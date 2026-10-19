@@ -1,0 +1,3 @@
+[submodule "upstream/agentscope"]
+	path = upstream/agentscope
+	url = https://github.com/agentscope-ai/agentscope.git
