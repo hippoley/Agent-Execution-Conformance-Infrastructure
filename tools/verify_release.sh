@@ -4,7 +4,7 @@ set -euo pipefail
 EXPECTED_TREE="11d2173f891739d3e359af892eb576751a0a85f8"
 fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 repo_root="$(git rev-parse --show-toplevel 2>/dev/null)" || fail 'Not inside a Git repository'
-test "$repo_root" = "$PWD" || fail 'Run from repository root'
+test -z "$(git rev-parse --show-prefix)" || fail 'Run from repository root'
 test ! -e .gitmodules || fail 'Legacy .gitmodules remains'
 test ! -e third_party/agentscope || fail 'Legacy AgentScope submodule path remains'
 test -f vendor/agentscope/LICENSE || fail 'Vendor LICENSE not present'
@@ -37,11 +37,13 @@ AECI_ROOT="$repo_root" python - <<'PY'
 import os
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 root = Path(os.environ['AECI_ROOT'])
 cmd = [sys.executable, '-c', 'import aeci; assert aeci.evaluate({}).allowed is False']
 env = dict(os.environ, PYTHONPATH=str(root / 'src'))
-subprocess.run(cmd, cwd='/tmp', env=env, check=True)
+with tempfile.TemporaryDirectory() as isolated_cwd:
+    subprocess.run(cmd, cwd=isolated_cwd, env=env, check=True)
 PY
 echo 'PASS: exact v2.0.10 committed source tree + original license'
 echo 'PASS: no old AgentScope submodule, no nested vendor gitlinks'

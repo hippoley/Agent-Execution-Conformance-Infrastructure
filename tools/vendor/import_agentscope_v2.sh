@@ -13,7 +13,7 @@ OLD="third_party/agentscope"
 
 fail() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 command -v git >/dev/null || fail 'Git required'
-test "$(git rev-parse --show-toplevel)" = "$PWD" || fail 'Run from repository root'
+test -z "$(git rev-parse --show-prefix)" || fail 'Run from repository root'
 test -z "$(git status --porcelain --untracked-files=normal)" || fail 'Working tree must be clean'
 test "$(git branch --show-current)" = "refactor/coherent-conformance-layout" || fail 'Use the dedicated review branch'
 git ls-files --stage -- "$OLD" | grep -q '^160000 ' || fail 'Expected AgentScope gitlink not found'
