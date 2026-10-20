@@ -19,6 +19,8 @@ if git ls-files --stage -- third_party/agentscope | grep -q '^160000 '; then
 fi
 test -f src/aeci/contract.py || fail 'AECI first-party code missing'
 python -m unittest discover -s tests -v || fail 'AECI unit tests failed'
+node --test runners/device-command.test.mjs || fail 'Device-command tests failed'
+node runners/conformance.mjs runners/device-command.mjs || fail 'Reference adapter conformance failed'
 
 allowed_output="$(PYTHONPATH=src python -m aeci examples/proposals/allowed.json)" || fail 'Allowed proposal CLI failed'
 rejected_status=0
@@ -47,5 +49,7 @@ with tempfile.TemporaryDirectory() as isolated_cwd:
 PY
 echo 'PASS: exact v2.0.10 committed source tree + original license'
 echo 'PASS: no old AgentScope submodule, no nested vendor gitlinks'
-echo 'PASS: first-party AECI isolated import, tests, allow/deny outputs'
+echo 'PASS: first-party AECI tests and allow/deny outputs'
+echo 'PASS: device-command tests and seven public conformance vectors'
+echo 'PASS: isolated AECI import'
 echo 'MANUAL GATE STILL REQUIRED: upstream runtime tests and attribution review'

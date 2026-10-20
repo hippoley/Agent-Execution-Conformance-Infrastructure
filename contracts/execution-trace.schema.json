@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/hippoley/Agent-Execution-Conformance-Infrastructure/contracts/execution-trace.schema.json",
+  "title": "Agent execution trace event",
+  "type": "object",
+  "required": ["seq", "type", "run_id", "payload"],
+  "properties": {
+    "seq": { "type": "integer", "minimum": 1 },
+    "type": {
+      "enum": ["run.started", "step.started", "step.completed", "run.completed", "run.failed"]
+    },
+    "run_id": { "type": "string", "minLength": 1 },
+    "payload": { "type": "object" }
+  },
+  "additionalProperties": false
+}

@@ -14,7 +14,9 @@ The complete AgentScope v2.0.10 source tree is committed in `vendor/agentscope/`
 
 ## Local verification
 
-- `tools/verify_release.sh`: passed. This ran 5 AECI unit tests, allow/deny CLI fixtures, an isolated import check, the pinned tree check, license check and no-gitlink checks.
+- `tools/verify_release.sh`: passed. It ran the 5 AECI unit tests, 12 device-command tests, all 7 public vectors, allow/deny CLI fixtures, an isolated import check, and the pinned tree/license/no-gitlink checks.
+- `node --test runners/device-command.test.mjs`: 12 tests passed, including the public vectors and false-success adapter check.
+- `node runners/conformance.mjs runners/device-command.mjs`: all 7 public vectors passed against the reference simulator.
 - Python AST parsing: 496 AgentScope source files parsed successfully.
 - Package smoke test: importing from `vendor/agentscope/src` reported version `2.0.10`.
 - `git diff --check`: passed for the local changes.

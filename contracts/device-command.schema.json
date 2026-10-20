@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/hippoley/Agent-Execution-Conformance-Infrastructure/contracts/device-command.schema.json",
+  "title": "Agent to device command envelope",
+  "type": "object",
+  "required": ["schema_version", "command_id", "tenant_id", "device_id", "session_id", "capability", "arguments", "issued_at", "expires_at", "idempotency_key"],
+  "properties": {
+    "schema_version": { "const": "1" },
+    "command_id": { "type": "string", "minLength": 1 },
+    "tenant_id": { "type": "string", "minLength": 1 },
+    "device_id": { "type": "string", "minLength": 1 },
+    "session_id": { "type": "string", "minLength": 1 },
+    "capability": { "type": "string", "minLength": 1 },
+    "arguments": { "type": "object" },
+    "issued_at": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+    "expires_at": { "type": "integer", "minimum": 1, "maximum": 9007199254740991 },
+    "idempotency_key": { "type": "string", "minLength": 1 }
+  },
+  "additionalProperties": false
+}

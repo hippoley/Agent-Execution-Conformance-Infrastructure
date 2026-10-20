@@ -1,3 +1,5 @@
-# Integration adapters
+# Adapters
 
-No production adapters are implemented yet. Planned adapters translate AgentScope proposals and Tuya API requests into the independent AECI contract. Keep execution and physical-state confirmation behind explicit permission and evidence boundaries.
+Adapters are the only project-owned code allowed to know a framework's lifecycle API. Each adapter maps framework events to [`contracts/execution-trace.md`](../contracts/execution-trace.md) and declares which capabilities it cannot represent.
+
+No framework or device adapter ships yet. An AgentScope adapter can be added after the profile is independently useful; a Tuya adapter should wait for a real device fixture and verified permission boundary. Integration code must not modify the vendored source under `vendor/agentscope/`.

@@ -1,27 +1,29 @@
 # Architecture and ownership boundaries
 
 ```text
-untrusted proposal (JSON)
+Agent / application
         |
-        v
-src/aeci/contract.py  -- deterministic, deny-by-default decision
+        +--> src/aeci/contract.py -- deterministic proposal decision (demo)
         |
-        +--> Decision: allowed + reason codes
-        |
-        X  No device execution, no state mutation
+        +--> runners/device-command.mjs -- reference command validator/simulator
+                    |                         |
+                    |                         +--> fixtures + contracts
+                    X No real transport or physical device
 
-future: adapters/agentscope -> independent contract -> adapters/tuya
-                          (not implemented)
-third_party/agentscope: upstream Git submodule, not first-party source
+future: AgentScope adapter -> shared contract -> TuyaOpen / ESP32 adapter
+        (not implemented)                       (not implemented)
+
+vendor/agentscope: exact upstream v2.0.10 source snapshot; not first-party code
 ```
 
 ## Ownership rules
 
 - `src/aeci`: first-party original implementation, no import from a specific agent framework.
-- `adapters`: integration-specific translation only; adapters must not grant privileges by themselves.
-- `third_party`: licenses, source identities, and upstream provenance remain intact.
+- `contracts`: first-party experimental contract and schemas; not a standard or production authorization system.
+- `adapters`: integration-specific translation only; no framework or device adapter ships yet.
+- `vendor/agentscope`: immutable third-party source snapshot; preserve upstream licenses and provenance.
 - `examples` and `tests`: executable evidence, not marketing assertions.
 
 ## Evidence boundary
 
-The current checker can produce a deterministic authorization *decision*. It cannot attest who made the request, whether a device received the command, or whether the requested physical state occurred. Execution receipts, physical observations, replay and idempotency controls, and independent conformance profiles remain future work.
+The AECI proposal checker and device-command simulator are separate local demonstrators. The simulator exercises expiry, identity/capability checks, idempotency and state readback against a fake device; it does not authenticate a real principal, deliver a command, persist records safely across crashes, or attest physical state. Production transport, hardware observations, cancellation races and independent adapter validation remain future work.
