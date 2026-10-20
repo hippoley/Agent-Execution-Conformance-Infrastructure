@@ -1,24 +1,49 @@
 #!/usr/bin/env bash
-# AECI release gate: inspect exact vendored source and run standalone tests.
+# Fail-closed, local-only verification of the pinned release and AECI core.
 set -euo pipefail
 EXPECTED_TREE="11d2173f891739d3e359af892eb576751a0a85f8"
-EXPECTED_COMMIT="e6c014f0be49b2a6f6f62a9453082a0b975484e1"
-fail() { echo "FAIL: $*" >&2; exit 1; }
-test "$(git rev-parse --show-toplevel)" = "$PWD" || fail "Run at repository root"
-test -d vendor/agentscope || fail "vendor/agentscope missing"
-test -f vendor/agentscope/LICENSE || fail "Original upstream LICENSE missing"
-test ! -f .gitmodules || fail "Old Git submodule configuration still exists"
-test -z "$(git ls-files --stage -- vendor/agentscope | awk '$1 == "160000" {print $0}')" || fail "Gitlink in vendor directory"
-actual_tree="$(git rev-parse HEAD:vendor/agentscope 2>/dev/null)" || fail "Vendored source absent from committed Git tree"
-test "$actual_tree" = "$EXPECTED_TREE" || fail "Tree mismatch: $actual_tree expected $EXPECTED_TREE"
-test -f src/aeci/contract.py || fail "Independent AECI core missing"
-python -m unittest discover -s tests -v || fail "AECI tests failed"
-PYTHONPATH=src python -m aeci examples/proposals/allowed.json > /tmp/aeci-allowed-$$.json || fail "Allowed fixture rejected"
-if PYTHONPATH=src python -m aeci examples/proposals/denied.json > /tmp/aeci-denied-$$.json; then
-  fail "Denied fixture unexpectedly allowed"
+fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
+repo_root="$(git rev-parse --show-toplevel 2>/dev/null)" || fail 'Not inside a Git repository'
+test "$repo_root" = "$PWD" || fail 'Run from repository root'
+test ! -e .gitmodules || fail 'Legacy .gitmodules remains'
+test ! -e third_party/agentscope || fail 'Legacy AgentScope submodule path remains'
+test -f vendor/agentscope/LICENSE || fail 'Vendor LICENSE not present'
+
+actual_tree="$(git rev-parse 'HEAD:vendor/agentscope' 2>/dev/null)" || fail 'Committed vendor tree missing'
+test "$actual_tree" = "$EXPECTED_TREE" || fail "Vendor tree does not match official v2.0.10: $actual_tree"
+if git ls-tree -r HEAD vendor/agentscope | grep -q '^160000 commit '; then
+  fail 'Nested Gitlink detected under vendor/agentscope'
 fi
-rm -f /tmp/aeci-allowed-$$.json /tmp/aeci-denied-$$.json
-echo "PASS: exact v2.0.10 vendor tree $actual_tree ($EXPECTED_COMMIT)"
-echo "PASS: upstream LICENSE present; no submodule configuration or gitlink"
-echo "PASS: independent AECI tests and allow/deny fixtures"
-echo "NOTE: upstream runtime compatibility and third-party notices still require manual review."
+if git ls-files --stage -- third_party/agentscope | grep -q '^160000 '; then
+  fail 'Old AgentScope gitlink still tracked'
+fi
+test -f src/aeci/contract.py || fail 'AECI first-party code missing'
+python -m unittest discover -s tests -v || fail 'AECI unit tests failed'
+
+allowed_output="$(PYTHONPATH=src python -m aeci examples/proposals/allowed.json)" || fail 'Allowed proposal CLI failed'
+rejected_status=0
+rejected_output="$(PYTHONPATH=src python -m aeci examples/proposals/denied.json)" || rejected_status=$?
+test "$rejected_status" -eq 1 || fail "Denied proposal must exit 1, observed $rejected_status"
+python - "$allowed_output" "$rejected_output" <<'PY'
+import json
+import sys
+allow = json.loads(sys.argv[1])
+deny = json.loads(sys.argv[2])
+assert allow['allowed'] is True and allow['reasons'] == [], allow
+assert deny['allowed'] is False and 'target_not_allowed' in deny['reasons'], deny
+PY
+
+AECI_ROOT="$repo_root" python - <<'PY'
+import os
+import subprocess
+import sys
+from pathlib import Path
+root = Path(os.environ['AECI_ROOT'])
+cmd = [sys.executable, '-c', 'import aeci; assert aeci.evaluate({}).allowed is False']
+env = dict(os.environ, PYTHONPATH=str(root / 'src'))
+subprocess.run(cmd, cwd='/tmp', env=env, check=True)
+PY
+echo 'PASS: exact v2.0.10 committed source tree + original license'
+echo 'PASS: no old AgentScope submodule, no nested vendor gitlinks'
+echo 'PASS: first-party AECI isolated import, tests, allow/deny outputs'
+echo 'MANUAL GATE STILL REQUIRED: upstream runtime tests and attribution review'
