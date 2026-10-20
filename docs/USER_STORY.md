@@ -8,7 +8,7 @@ A user story names an actor, a concrete trigger, an observable outcome, and a co
 
 ## Current product truth
 
-This repository now contains two small, runnable local artifacts: a deterministic proposal checker in `src/aeci/` and a reference device-command simulator plus public fixtures in `runners/`, `contracts/`, and `fixtures/`. The simulator tests a contract; it is not a Tuya adapter, authenticated device service, or hardware conformance result. AgentScope v2.0.10 is present as a complete source snapshot, but no AgentScope integration is implemented. No third party is known to consume these artifacts.
+This repository's first executable slice is the AECI device-command contract, seven public fixtures, and a JavaScript reference simulator/adapter harness in `contracts/`, `fixtures/`, and `runners/`. It is not a Tuya adapter, authenticated device service, or hardware conformance result. AgentScope v2.0.10 is present as a complete source snapshot, but no AgentScope integration is implemented. No third party is known to consume these artifacts.
 
 ## Story 1: independently check a bounded device command contract
 
@@ -30,9 +30,9 @@ This repository now contains two small, runnable local artifacts: a deterministi
 
 ## Excluded from the current product claim
 
-- Building the full Managed Agents control plane shown in [the target integration architecture](target/INTEGRATION_ARCHITECTURE.md).
+- Building the full Managed Agents control plane shown in [the system architecture](ARCHITECTURE.md).
 - Claiming Tuya, ESP32, AgentScope runtime, MCP transport, OTA, voice, or cloud service integration from source presence or diagrams.
-- Treating an allow decision, simulator result, GitHub star, or passing local test as proof of physical safety or external adoption.
+- Treating a simulator result, GitHub star, or passing local test as proof of physical safety or external adoption.
 
 ## Decision gate
 

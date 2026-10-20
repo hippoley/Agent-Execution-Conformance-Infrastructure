@@ -1,5 +1,5 @@
 # Adapters
 
-Adapters are the only project-owned code allowed to know a framework's lifecycle API. Each adapter maps framework events to [`contracts/execution-trace.md`](../contracts/execution-trace.md) and declares which capabilities it cannot represent.
+Adapters translate framework and device APIs into the shared AgentPanel contracts. The current device adapter test interface is [`contracts/device-adapter.md`](../contracts/device-adapter.md); the execution-trace contract is a future lifecycle profile, not yet exercised by a runner.
 
-No framework or device adapter ships yet. An AgentScope adapter can be added after the profile is independently useful; a Tuya adapter should wait for a real device fixture and verified permission boundary. Integration code must not modify the vendored source under `vendor/agentscope/`.
+No framework or production device adapter ships yet. An AgentScope adapter should map its tool-call lifecycle to the device-command contract; a TuyaOpen adapter should map that contract to a real supported device path. Integration code must not modify the vendored source under `vendor/agentscope/`.

@@ -2,9 +2,8 @@
 
 ## What exists
 
-AECI is an early, independent conformance experiment for agent-proposed device actions. Its current runnable slice consists of:
+AgentPanel is the target managed-agent and IoT system. AECI is its first executable infrastructure slice: a conformance profile for agent-to-device commands. The current runnable slice consists of:
 
-- a small deterministic proposal checker in `src/aeci/`;
 - a transport-neutral device-command envelope and schemas in `contracts/`;
 - a JavaScript reference simulator and adapter conformance runner in `runners/`;
 - seven machine-readable command vectors in `fixtures/device-command/`;
@@ -18,10 +17,10 @@ When an agent asks a device to act, an API-level accepted/completed state can di
 
 ## Architecture views
 
-- [Current implementation architecture](ARCHITECTURE.md): code ownership and evidence boundary for what runs today.
-- [Target integration architecture](target/INTEGRATION_ARCHITECTURE.md): the customer's broader Managed Agents + AgentScope + TuyaOpen/ESP32 system, clearly marked as target context rather than shipped scope.
+- [System architecture](ARCHITECTURE.md): the canonical AgentPanel target and the AECI conformance layer within it.
+- [Implementation status](IMPLEMENTATION_STATUS.md): code ownership and evidence boundary for what runs today.
 
-The target view is intentionally kept in one canonical document so product overview and architecture do not repeat the same large diagram.
+The system diagram is kept in one canonical document so product overview does not duplicate it.
 
 ## Story map
 

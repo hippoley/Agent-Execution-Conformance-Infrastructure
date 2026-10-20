@@ -19,11 +19,10 @@ test ! -f .gitmodules
 test -f vendor/agentscope/LICENSE
 test "$(git rev-parse HEAD:vendor/agentscope)" = "11d2173f891739d3e359af892eb576751a0a85f8"
 test -z "$(git ls-files --stage -- vendor/agentscope | grep '^160000 ' || true)"
-python -m unittest discover -s tests -v
 node --test runners/device-command.test.mjs
 node runners/conformance.mjs runners/device-command.mjs
 ```
 
-The pinned source tree and license, AECI tests/CLI, source syntax and basic package import have been verified. The full upstream test suite still requires its development dependencies and service-specific test environment. Import success does not prove runtime compatibility with Tuya, ESP32, model APIs or external services.
+The pinned source tree and license, conformance tests/CLI, source syntax and basic AgentScope package import have been verified. The full upstream test suite still requires its development dependencies and service-specific test environment. Import success does not prove runtime compatibility with Tuya, ESP32, model APIs or external services.
 
 No GitHub Actions, workflow dispatch or merge were needed for this import. See [the recorded import evidence](../AGENTSCOPE_V2_0_10_IMPORT_REPORT.md). Merge remains a separate review decision.

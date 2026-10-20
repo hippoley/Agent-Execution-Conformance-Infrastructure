@@ -2,6 +2,8 @@
 
 ## Current thesis
 
+Within the AgentPanel system architecture, this repository should grow the contract and conformance boundary between the managed cloud agent runtime and physical device capabilities. AgentScope supplies an upstream runtime candidate; TuyaOpen and ESP32 supply the device/edge path. AECI tests the compatibility and outcome semantics between those independently evolving sides. It is not a competing agent runtime, device SDK, or production control plane.
+
 The candidate gap is not another agent framework, IoT SDK, MCP replacement, policy engine, or general observability convention. It is a portable conformance profile for translating asynchronous agent operation outcomes into physical-effect outcomes: authorization, expiry, retries, cancellation races, ambiguous completion and read-after-write verification must remain distinguishable across runtimes and device transports.
 
 This is a useful infrastructure candidate because a stronger model does not remove the need to prevent an expired command from opening a lock, or to prove whether a device actually changed state. Better models increase the number of actions, which increases the need for this boundary.

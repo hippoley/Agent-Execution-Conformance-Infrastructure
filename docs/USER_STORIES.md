@@ -4,7 +4,17 @@
 
 > As a maintainer of an agent-to-device integration, when an agent invokes a physical capability through MCP or a provider tool API, I need a portable test profile that checks authorization, expiry, retries, cancellation races and observed device state, so that an API-level success cannot be mistaken for a safe physical outcome. I accept the profile when an independent adapter can run the public fixtures and produce the same outcome classifications without importing this repository's simulator.
 
-This is the project's proposed product, not the whole Managed Agents platform shown in the target architecture. The broader platform stories below are customer-context and future integration requirements; they are not a commitment to implement a competing agent runtime, IoT SDK or control plane.
+This is the first testable infrastructure capability inside the AgentPanel system architecture, not the whole platform. The broader stories below name the outcomes the managed-agent control plane and Tuya/ESP32 edge must eventually support; they do not imply that those services are implemented here or that this project should replace AgentScope or TuyaOpen.
+
+## Architecture mapping
+
+| Story family | Architecture boundary | Role in this repository |
+| --- | --- | --- |
+| M1-M14 | Managed Agents control plane, runtime and governance | Product requirements; not implemented services. |
+| D1-D7 | Tuya device plane and ESP32 execution edge | Product requirements; no real device adapter or board validation. |
+| C1-C4 | AECI conformance plane between cloud-agent adapters and device adapters | Current project slice: C1/C2 have simulator evidence; C3/C4 remain unimplemented. |
+
+The AECI harness is test-time infrastructure. It checks that future adapters preserve the command and outcome contract; it does not sit as an extra production service on every device request.
 
 ## Repository-owned conformance stories
 

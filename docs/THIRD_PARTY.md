@@ -10,7 +10,7 @@
 - Review-branch state: complete `vendor/agentscope` ordinary tracked files, verified by exact Git tree equality; `.gitmodules` and the old gitlink were removed.
 - Merge state: this import is on the open review branch and has not been merged to `main`.
 
-AECI's first-party source lives under `src/aeci`. AgentScope's source always remains attributed to the original authors regardless of whether it is imported. Its original `LICENSE`, author information and source comments are preserved. Copying the release preserves the tagged source tree, not the full upstream commit history.
+AECI-owned contracts, fixtures, runners and adapters live outside `vendor/agentscope`. AgentScope's source always remains attributed to the original authors regardless of whether it is imported. Its original `LICENSE`, author information and source comments are preserved. Copying the release preserves the tagged source tree, not the full upstream commit history.
 
 ## Tuya
 

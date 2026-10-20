@@ -1,10 +1,9 @@
 # Agent Execution Conformance Infrastructure (AECI)
 
-**Independent, framework-neutral evaluation of agent-proposed actions.** AECI is its own project, not a rebranded distribution of AgentScope.
+**AgentPanel's first executable infrastructure slice:** a framework-neutral conformance profile for the command boundary between cloud agents and physical capabilities. AgentScope is an upstream runtime dependency candidate, not a replacement for this project's contract.
 
 ## Current progress (read before use)
 
-- Independent decision contract in `src/aeci/`: implemented (deterministic example, not production authorization).
 - Device-command profile in `contracts/`, `runners/`, and `fixtures/`: local reference simulator and seven vectors; no real adapter or physical device.
 - AgentScope `v2.0.10` full source: **imported on this review branch** as ordinary files at `vendor/agentscope/`; exact upstream tree SHA verified. This change is not yet merged to `main`.
 - One-time exact release import script: `tools/vendor/import_agentscope_v2.sh`.
@@ -13,14 +12,9 @@
 ## Local smoke tests (free; no Actions)
 
 ```bash
-python -m unittest discover -s tests -v
 node --test runners/device-command.test.mjs
 node runners/conformance.mjs runners/device-command.mjs
-PYTHONPATH=src python -m aeci examples/proposals/allowed.json
-PYTHONPATH=src python -m aeci examples/proposals/denied.json
 ```
-
-The second fixture is expected to exit 1 (denied).
 
 ## Imported AgentScope source
 
@@ -32,12 +26,10 @@ The one-time importer and fail-closed verifier are retained under `tools/vendor/
 
 | Directory | Ownership / responsibility |
 | --- | --- |
-| `src/aeci/` | First-party independent conformance contract |
 | `contracts/`, `fixtures/`, `runners/` | Experimental command contract, public vectors, and reference simulator |
 | `adapters/` | Adapter boundary and interface notes; no real framework/device adapter shipped |
 | `vendor/agentscope/` | Exact third-party v2.0.10 source snapshot; not first-party code |
-| `tests/`, `examples/` | Reproducible conformance fixtures |
 | `tools/vendor/` | Auditable one-time import tools |
 | `docs/` | Architectural boundaries and third-party provenance |
 
-See [the current implementation architecture](docs/ARCHITECTURE.md), [the customer's target integration architecture](docs/target/INTEGRATION_ARCHITECTURE.md), [user stories](docs/USER_STORIES.md), and [provenance](docs/THIRD_PARTY.md). No affiliation with or endorsement from AgentScope or Tuya is claimed.
+See the [AgentPanel system architecture](docs/ARCHITECTURE.md), [current implementation status](docs/IMPLEMENTATION_STATUS.md), [user stories](docs/USER_STORIES.md), and [provenance](docs/THIRD_PARTY.md). No affiliation with or endorsement from AgentScope or Tuya is claimed.
