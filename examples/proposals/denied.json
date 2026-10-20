@@ -1,0 +1,18 @@
+{
+  "request_id": "demo-002",
+  "actor": "alice",
+  "target": "window-2",
+  "operation": "close",
+  "permissions": [
+    "execute"
+  ],
+  "allowed_targets": [
+    "window-1"
+  ],
+  "allowed_operations": [
+    "close"
+  ],
+  "expected_state": {
+    "position": "closed"
+  }
+}
