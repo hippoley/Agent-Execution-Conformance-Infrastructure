@@ -7,10 +7,10 @@
 - Release: https://github.com/agentscope-ai/agentscope/releases/tag/v2.0.10
 - Immutable tag commit at verification: `e6c014f0be49b2a6f6f62a9453082a0b975484e1`
 - Immutable Git source-tree SHA: `11d2173f891739d3e359af892eb576751a0a85f8`
-- Current review-branch state: old submodule `third_party/agentscope`, NOT a complete imported tree.
-- Target after import: `vendor/agentscope` ordinary tracked files, verified by exact Git tree equality.
+- Review-branch state: complete `vendor/agentscope` ordinary tracked files, verified by exact Git tree equality; `.gitmodules` and the old gitlink were removed.
+- Merge state: this import is on the open review branch and has not been merged to `main`.
 
-AECI's first-party source lives under `src/aeci`. AgentScope's source always remains attributed to the original authors regardless of whether it is imported. We must not erase licenses, notices, author information or histories represented in source comments. Copying the release preserves files, not the full upstream commit history.
+AECI's first-party source lives under `src/aeci`. AgentScope's source always remains attributed to the original authors regardless of whether it is imported. Its original `LICENSE`, author information and source comments are preserved. Copying the release preserves the tagged source tree, not the full upstream commit history.
 
 ## Tuya
 
