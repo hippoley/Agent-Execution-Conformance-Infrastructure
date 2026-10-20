@@ -1,18 +1,27 @@
-# AgentScope dependency handling
+# AgentScope v2.0.10 complete source import
 
-Current source is a **Git submodule**, not 1:1 imported ordinary tracked files.
+This replaces the *temporary* `third_party/agentscope` gitlink with a full `vendor/agentscope` directory containing the **exact tagged upstream source**.
 
-- Upstream: https://github.com/agentscope-ai/agentscope
-- Pinned commit: `402c3664f70cb339f397c5ee40e662bc0d99eed0`
-- Expected upstream source tree: `97ac65b28422ac44ef2d9d8315d6cf95e887d35f`
-- Current path: `third_party/agentscope/`
+Pinned Git identifiers:
 
-For normal development, clone with `git clone --recurse-submodules`. Do not run source-vendoring workflows merely to use the dependency.
+- Tag: `v2.0.10`
+- Commit: `e6c014f0be49b2a6f6f62a9453082a0b975484e1`
+- Tree: `11d2173f891739d3e359af892eb576751a0a85f8`
 
-Optional (only if full-source redistribution is specifically needed):
+## Execution
+
+From clean checkout of `refactor/coherent-conformance-layout`, run `bash tools/vendor/import_agentscope_v2.sh`. It checks the tag and tree before any destructive index change, removes the submodule, reads all pinned upstream source objects into the vendor subtree and checks tree equality. It then makes a **local-only** commit. Review and push manually.
+
+## Acceptance
 
 ```bash
-bash tools/vendor/import_agentscope_exact.sh
+test ! -f .gitmodules
+test -f vendor/agentscope/LICENSE
+test "$(git rev-parse HEAD:vendor/agentscope)" = "11d2173f891739d3e359af892eb576751a0a85f8"
+test -z "$(git ls-files --stage -- vendor/agentscope | grep '^160000 ' || true)"
+python -m unittest discover -s tests -v
 ```
 
-The script checks a clean working tree, pins the source commit, checks the subtree SHA, then pushes a dedicated review branch. It does **not** merge into main. The optional manual workflow in `.github/workflows/vendor-agentscope.yml` may consume GitHub Actions minutes; it will not run on pushes or PRs. Preserve upstream licensing and original code.
+Additional gates: inspect source inventory / license, test AgentScope installation and its official test profile in a suitable environment; verify AECI's standalone fixture CLI. Import success does not prove runtime compatibility.
+
+No GitHub Actions, workflow dispatch or merge are needed for this import. Source cannot be claimed as imported until the new source-tree SHA is observed in the target repository.
