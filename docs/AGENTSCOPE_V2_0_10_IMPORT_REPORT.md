@@ -2,7 +2,7 @@
 
 ## Result
 
-The complete AgentScope v2.0.10 source tree is committed in `vendor/agentscope/` as ordinary files on local branch `refactor/coherent-conformance-layout`. The old gitlink and `.gitmodules` entry are removed. A later local commit adds the runnable device-command profile and reconciled docs. Pushing these commits to the remote Draft PR is currently blocked by GitHub HTTPS connectivity. This is a source snapshot; it does not include the upstream commit history or imply endorsement.
+The complete AgentScope v2.0.10 source tree is committed in `vendor/agentscope/` as ordinary files on `refactor/coherent-conformance-layout`, and the consolidated conformance slice has been pushed to that remote review branch. The old gitlink and `.gitmodules` entry are removed. The change is not merged to `main`. This is a source snapshot; it does not include the upstream commit history or imply endorsement.
 
 | Check | Evidence |
 | --- | --- |
@@ -25,4 +25,4 @@ The complete AgentScope v2.0.10 source tree is committed in `vendor/agentscope/`
 
 - AgentScope's full upstream pytest suite was not run: `pytest` and the project's development dependency set are not installed in this environment.
 - No Tuya account, ESP32 board, device transport, model credentials or external service was configured. The import proves source completeness and a basic Python package import, not end-to-end runtime behavior.
-- The changes are committed locally but have not reached the remote Draft PR branch, and are not merged to `main`.
+- The changes are pushed to the remote review branch, but are not merged to `main`.

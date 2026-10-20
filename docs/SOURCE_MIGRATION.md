@@ -13,7 +13,7 @@ The complete AgentScope `v2.0.10` source snapshot is present as ordinary files i
 | Files | 1,178 ordinary files |
 | License | Upstream Apache-2.0 license retained |
 | Import commit | `cccc493` |
-| Review state | Local review branch; push to the remote Draft PR is blocked by GitHub HTTPS connectivity, so the latest commits are not yet published |
+| Review state | Consolidated commits are pushed to the remote review branch; not merged to `main` |
 
 ## Reproduce the checks
 
