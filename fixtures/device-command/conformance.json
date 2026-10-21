@@ -1,12 +1,147 @@
 {
-  "profile": "agent-device-effect/0.1",
+  "profile": "agent-device-effect/0.2",
   "vectors": [
-    { "id": "valid-command", "fixture": "valid", "now": 1020, "expected": { "state": "succeeded", "code": "POSTCONDITION_VERIFIED" }, "expectedState": { "lampOn": true } },
-    { "id": "expired-command", "fixture": "expired", "now": 1060, "expected": { "state": "expired", "code": "COMMAND_EXPIRED" }, "expectedState": { "lampOn": false } },
-    { "id": "tenant-mismatch", "fixture": "valid", "now": 1020, "principal": { "tenantId": "other" }, "expected": { "state": "denied", "code": "IDENTITY_MISMATCH" }, "expectedState": { "lampOn": false } },
-    { "id": "capability-denied", "fixture": "valid", "now": 1020, "principal": { "capabilities": [] }, "expected": { "state": "denied", "code": "CAPABILITY_NOT_ALLOWED" }, "expectedState": { "lampOn": false } },
-    { "id": "postcondition-unavailable", "fixture": "valid", "now": 1020, "options": { "failReadback": true }, "expected": { "state": "unverified", "code": "POSTCONDITION_UNAVAILABLE" }, "expectedState": { "lampOn": true } },
-    { "id": "duplicate-delivery", "fixture": "valid", "now": 1020, "repeat": 2, "expectedStates": ["succeeded", "duplicate"], "expectedState": { "lampOn": true } },
-    { "id": "idempotency-payload-conflict", "fixture": "valid", "now": 1020, "mutateSecond": { "arguments": { "on": false } }, "expectedStates": ["succeeded", "denied"], "expectedSecondCode": "IDEMPOTENCY_KEY_REUSE", "expectedState": { "lampOn": true } }
+    {
+      "id": "valid-command",
+      "fixture": "valid",
+      "now": 1020,
+      "expected": {
+        "state": "succeeded",
+        "code": "POSTCONDITION_VERIFIED"
+      },
+      "expectedState": {
+        "lampOn": true
+      }
+    },
+    {
+      "id": "expired-command",
+      "fixture": "expired",
+      "now": 1060,
+      "expected": {
+        "state": "expired",
+        "code": "COMMAND_EXPIRED"
+      },
+      "expectedState": {
+        "lampOn": false
+      }
+    },
+    {
+      "id": "tenant-mismatch",
+      "fixture": "valid",
+      "now": 1020,
+      "principal": {
+        "tenantId": "other"
+      },
+      "expected": {
+        "state": "denied",
+        "code": "IDENTITY_MISMATCH"
+      },
+      "expectedState": {
+        "lampOn": false
+      }
+    },
+    {
+      "id": "capability-denied",
+      "fixture": "valid",
+      "now": 1020,
+      "principal": {
+        "capabilities": []
+      },
+      "expected": {
+        "state": "denied",
+        "code": "CAPABILITY_NOT_ALLOWED"
+      },
+      "expectedState": {
+        "lampOn": false
+      }
+    },
+    {
+      "id": "granted-but-unimplemented-capability",
+      "fixture": "valid",
+      "now": 1020,
+      "principal": {
+        "capabilities": [
+          "lamp.set_power",
+          "device.shell"
+        ]
+      },
+      "commandOverride": {
+        "capability": "device.shell",
+        "arguments": {
+          "on": false
+        }
+      },
+      "expected": {
+        "state": "denied",
+        "code": "UNSUPPORTED_CAPABILITY"
+      },
+      "expectedState": {
+        "lampOn": false
+      }
+    },
+    {
+      "id": "undeclared-argument-must-be-denied",
+      "fixture": "valid",
+      "now": 1020,
+      "commandOverride": {
+        "arguments": {
+          "on": false,
+          "extra": "unexpected"
+        }
+      },
+      "expected": {
+        "state": "denied",
+        "code": "INVALID_ARGUMENTS"
+      },
+      "expectedState": {
+        "lampOn": false
+      }
+    },
+    {
+      "id": "postcondition-unavailable",
+      "fixture": "valid",
+      "now": 1020,
+      "options": {
+        "failReadback": true
+      },
+      "expected": {
+        "state": "unverified",
+        "code": "POSTCONDITION_UNAVAILABLE"
+      },
+      "expectedState": {
+        "lampOn": true
+      }
+    },
+    {
+      "id": "duplicate-delivery",
+      "fixture": "valid",
+      "now": 1020,
+      "repeat": 2,
+      "expectedStates": [
+        "succeeded",
+        "duplicate"
+      ],
+      "expectedState": {
+        "lampOn": true
+      }
+    },
+    {
+      "id": "idempotency-payload-conflict",
+      "fixture": "valid",
+      "now": 1020,
+      "mutateSecond": {
+        "arguments": {
+          "on": false
+        }
+      },
+      "expectedStates": [
+        "succeeded",
+        "denied"
+      ],
+      "expectedSecondCode": "IDEMPOTENCY_KEY_REUSE",
+      "expectedState": {
+        "lampOn": true
+      }
+    }
   ]
 }
