@@ -8,13 +8,13 @@ A user story names an actor, a concrete trigger, an observable outcome, and a co
 
 ## Current product truth
 
-This repository's first executable slice is the AECI device-command contract, seven public fixtures, and a JavaScript reference simulator/adapter harness in `contracts/`, `fixtures/`, and `runners/`. It is not a Tuya adapter, authenticated device service, or hardware conformance result. AgentScope v2.0.10 is present as a complete source snapshot, but no AgentScope integration is implemented. No third party is known to consume these artifacts.
+This repository's first executable slice is the AECI device-command contract, nine public v0.2 vectors, and a JavaScript reference simulator/adapter harness in `contracts/`, `fixtures/`, and `runners/`. It is not a Tuya adapter, authenticated device service, or hardware conformance result. AgentScope v2.0.10 is present as a complete source snapshot, but no AgentScope integration is implemented. No third party is known to consume these artifacts.
 
 ## Story 1: independently check a bounded device command contract
 
 > As an **agent-to-device adapter maintainer**, when my adapter receives a versioned device command, I need to run public vectors for principal binding, capability allowlisting, expiry, duplicate delivery, idempotency-key misuse, and observed state, so that API acceptance cannot be reported as physical success. I can verify this when my adapter runs the published conformance CLI and produces the expected machine-readable outcomes without importing the reference simulator; it fails when invalid or expired commands are accepted, a retry repeats the modeled effect, missing readback is reported as success, or the harness depends on private project code.
 
-**Current evidence:** the reference simulator and seven conformance vectors run locally; a deliberately false-success adapter fails the harness. This proves only behavior against a simulator and injected test principal. Cancellation disposition, cross-process concurrency, crash-window reconciliation, real authentication, transport and hardware are outside the current evidence.
+**Current evidence:** the reference simulator and nine v0.2 conformance vectors run locally; a deliberately false-success adapter fails the harness. This proves only behavior against a simulator and injected test principal. Cancellation disposition, cross-process concurrency, crash-window reconciliation, real authentication, transport and hardware are outside the current evidence.
 
 ## Story 2: reproduce the imported upstream source
 
