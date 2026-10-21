@@ -6,7 +6,7 @@ AgentPanel is the target managed-agent and IoT system. AECI is its first executa
 
 - a transport-neutral device-command envelope and schemas in `contracts/`;
 - a JavaScript reference simulator and adapter conformance runner in `runners/`;
-- seven machine-readable command vectors in `fixtures/device-command/`;
+- nine machine-readable v0.2 command vectors in `fixtures/device-command/`;
 - a complete AgentScope v2.0.10 source snapshot under `vendor/agentscope/`, kept separate from AECI-owned code.
 
 The simulator exercises allow/deny, identity and capability checks, expiry, duplicate delivery, idempotency-key reuse and readback outcomes. It is test evidence for contract behavior, not a real device, production policy service or authenticated transport. The full customer system remains a target architecture.
@@ -36,7 +36,7 @@ Detailed actors, acceptance criteria and failure boundaries are in [USER_STORIES
 
 ## Evidence ladder
 
-1. **Local contract evidence:** current reference simulator passes seven vectors and the harness detects a deliberately false-success adapter. Test identity is injected; no real principal is authenticated.
+1. **Local contract evidence:** current reference simulator passes nine v0.2 vectors and the harness detects a deliberately false-success adapter. Test identity is injected; no real principal is authenticated.
 2. **Independent implementation:** a separately maintained adapter passes the published fixtures without importing this code. Not yet achieved.
 3. **Hardware evidence:** one named ESP32 board and pinned TuyaOpen release execute safe commands with traceable result/readback. Not yet achieved.
 4. **External adoption:** a third-party issue, PR, dependency, citation, or documented deployment refers to a released contract version. Not yet achieved.
