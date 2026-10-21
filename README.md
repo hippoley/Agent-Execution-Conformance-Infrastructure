@@ -4,10 +4,10 @@
 
 ## Current progress (read before use)
 
-- Device-command profile in `contracts/`, `runners/`, and `fixtures/`: local reference simulator and seven vectors; no real adapter or physical device.
+- Device-command profile in `contracts/`, `runners/`, and `fixtures/`: local reference simulator and nine v0.2 vectors; no real adapter or physical device.
 - AgentScope `v2.0.10` full source: **imported on this review branch** as ordinary files at `vendor/agentscope/`; exact upstream tree SHA verified. This change is not yet merged to `main`.
 - One-time exact release import script: `tools/vendor/import_agentscope_v2.sh`.
-- Tuya/AgentScope integration adapters, physical confirmation, durable idempotency: **NOT IMPLEMENTED**.
+- Tuya/AgentScope integration adapters, physical confirmation, durable idempotency: **NOT IMPLEMENTED**. Device-command v0.2 rejects granted-but-unimplemented capability names and undeclared arguments; simulator-only evidence.
 
 ## Local smoke tests (free; no Actions)
 
