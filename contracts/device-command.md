@@ -23,7 +23,7 @@ The authenticated transport identity must match `tenant_id` and `device_id`; fie
 
 ## Required execution semantics
 
-1. Reject an unknown schema version, capability, argument shape, tenant/device mismatch, expired command, or non-positive validity window.
+1. Reject an unknown schema version, capability, argument shape, tenant/device mismatch, expired command, or non-positive validity window. A principal grant does **not** prove the receiving adapter implements that capability: unsupported names must be denied, never reported as successful no-ops. In the current reference profile, `lamp.set_power` accepts exactly `{"on": boolean}` with no undeclared arguments.
 2. Never execute a command after its expiry. The receiver checks expiry using a trusted clock or a transport/session lease; an untrusted device timestamp alone is insufficient.
 3. Treat `command_id` and `idempotency_key` as deduplication keys within a documented retention window. A duplicate returns the original result and does not repeat the physical effect.
 4. Return distinct states: `accepted`, `executing`, `succeeded`, `failed`, `expired`, `denied`, `duplicate`. Acceptance is not physical success.
