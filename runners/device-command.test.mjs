@@ -35,6 +35,22 @@ test("rejects unapproved capabilities", async () => {
   assert.deepEqual(await validateCommand(command, principal, 1020), { state: "denied", code: "CAPABILITY_NOT_ALLOWED" });
 });
 
+test("refuses an unimplemented capability even if it appears in the principal grant", async () => {
+  const command = { ...await load("valid"), capability: "device.shell", arguments: { on: false } };
+  const granted = { ...principal, capabilities: new Set(["lamp.set_power", "device.shell"]) };
+  const device = new SimulatedDevice();
+  assert.deepEqual(validateCommand(command, granted, 1020), { state: "denied", code: "UNSUPPORTED_CAPABILITY" });
+  assert.deepEqual(await device.execute(command, granted, 1020), { state: "denied", code: "UNSUPPORTED_CAPABILITY" });
+  assert.deepEqual(await device.inspectState(), { lampOn: false });
+});
+
+test("rejects unexpected arguments even for an implemented capability", async () => {
+  const command = { ...await load("valid"), arguments: { on: false, extra: "unexpected" } };
+  const device = new SimulatedDevice();
+  assert.deepEqual(await device.execute(command, principal, 1020), { state: "denied", code: "INVALID_ARGUMENTS" });
+  assert.deepEqual(await device.inspectState(), { lampOn: false });
+});
+
 test("does not claim acceptance is physical success", async () => {
   const result = await new SimulatedDevice().execute(await load("valid"), principal, 1020, { failReadback: true });
   assert.deepEqual(result, { state: "unverified", code: "POSTCONDITION_UNAVAILABLE", command_id: "cmd-0001" });
@@ -82,9 +98,9 @@ test("concurrent duplicate deliveries cause one modeled physical effect", async 
 
 test("public conformance vectors pass against the reference simulator", async () => {
   const report = await runConformance(createDevice);
-  assert.equal(report.profile, "agent-device-effect/0.1");
+  assert.equal(report.profile, "agent-device-effect/0.2");
   assert.equal(report.passed, true);
-  assert.equal(report.results.length, 7);
+  assert.equal(report.results.length, 9);
   assert.ok(report.results.every((result) => typeof result.id === "string"
     && typeof result.passed === "boolean"
     && Array.isArray(result.states)
