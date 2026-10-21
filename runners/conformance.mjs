@@ -23,7 +23,9 @@ export async function runConformance(createDevice) {
   const manifest = JSON.parse(await readFile(manifestUrl, "utf8"));
   const results = [];
   for (const vector of manifest.vectors) {
-    const command = JSON.parse(await readFile(new URL(`${vector.fixture}.json`, fixturesUrl), "utf8"));
+    const fixture = JSON.parse(await readFile(new URL(`${vector.fixture}.json`, fixturesUrl), "utf8"));
+    // Public, declarative first-request variants let third-party adapters replay negatives.
+    const command = { ...fixture, ...(vector.commandOverride ?? {}) };
     const principalData = { ...defaultPrincipal, ...vector.principal };
     const principal = { ...principalData, capabilities: new Set(principalData.capabilities) };
     const device = createDevice({ initialState: { lampOn: false } });
