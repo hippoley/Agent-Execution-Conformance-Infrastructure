@@ -27,3 +27,15 @@
 Six tests use **explicitly synthetic normalized records** patterned after these two public producers. They test safe join/no-join interpretation, not byte-for-byte replay of upstream output, provider SDKs, or normative compatibility. Missing tool call IDs remain **unjoinable**; do not fill them with a different row ID. Different execution scopes do not merge. Custom outcomes remain outside this probe's three-known-value profile. A decision event alone never proves tool execution or an external effect.
 
 **Unclosed gates:** parse the unchanged producer artifacts in their native OTLP envelope shape; pin source revisions for both; independent implementer review; verify whether the SIG wants any further constraints before changing the proposed convention. No GitHub Actions and no upstream comments are needed for this local comparison.
+
+
+## 2026-10-22 Foreman artifact replay update
+
+The pinned `fixtures/otel/foreman-web-worker-receipt.ndjson` contains 6 OTLP/JSON envelopes, 9 spans, 4 decision events and 3 `execute_tool` spans. Parsing the retrieved artifact bytes with equivalent extraction/join logic yielded two lifecycles:
+
+- `require_approval → allow`: one matching execute span (`APPROVE_ONE_EXECUTION`).
+- `require_approval → deny`: zero matching execute spans (`DENY_NO_EXECUTION`).
+
+Both service names (`foreman-worker`, `foreman-web`) appear. All four decision events in this fixture have a tool-call ID and execution ID under the current join rule.
+
+**Verification boundary:** this confirms the *captured fixture's shape and observed relationship*, not that the committed Node module/tests have run. The current environment could not resolve github.com to clone the branch; `node --test runners/otel-foreman-replay.test.mjs` remains pending. The telemetry is explicitly simulated and absence of an execution span is not proof that no external effect occurred outside the captured evidence.
