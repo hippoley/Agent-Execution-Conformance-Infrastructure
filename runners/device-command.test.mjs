@@ -84,7 +84,7 @@ test("public conformance vectors pass against the reference simulator", async ()
   const report = await runConformance(createDevice);
   assert.equal(report.profile, "agent-device-effect/0.1");
   assert.equal(report.passed, true);
-  assert.equal(report.results.length, 7);
+  assert.equal(report.results.length, 9);
   assert.ok(report.results.every((result) => typeof result.id === "string"
     && typeof result.passed === "boolean"
     && Array.isArray(result.states)
