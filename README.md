@@ -1,10 +1,10 @@
-# Agent Execution Conformance Infrastructure (AECI)
+# AgentPanel
 
-**AgentPanel's first executable infrastructure slice:** a framework-neutral conformance profile for the command boundary between cloud agents and physical capabilities. AgentScope is an upstream runtime dependency candidate, not a replacement for this project's contract.
+AgentPanel is a managed-agent and IoT system project centered on the customer architecture in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md). AgentScope is the first cloud runtime candidate; TuyaOpen and ESP32 define the device path. The repository currently includes a small device-command contract and local test harness to check assumptions during development. They are validation assets, not a separate product, production service, or runtime layer.
 
 ## Current progress (read before use)
 
-- Device-command profile in `contracts/`, `runners/`, and `fixtures/`: local reference simulator and seven vectors; no real adapter or physical device.
+- Device-command checks in `contracts/`, `runners/`, and `fixtures/`: local reference simulator and seven vectors; no real adapter or physical device.
 - AgentScope `v2.0.10` full source: **imported on this review branch** as ordinary files at `vendor/agentscope/`; exact upstream tree SHA verified. This change is not yet merged to `main`.
 - One-time exact release import script: `tools/vendor/import_agentscope_v2.sh`.
 - Tuya/AgentScope integration adapters, physical confirmation, durable idempotency: **NOT IMPLEMENTED**.
@@ -26,8 +26,8 @@ The one-time importer and fail-closed verifier are retained under `tools/vendor/
 
 | Directory | Ownership / responsibility |
 | --- | --- |
-| `contracts/`, `fixtures/`, `runners/` | Experimental command contract, public vectors, and reference simulator |
-| `adapters/` | Adapter boundary and interface notes; no real framework/device adapter shipped |
+| `contracts/`, `fixtures/`, `runners/` | Development/test-time command contract checks, vectors, and reference simulator |
+| `adapters/` | Integration boundary notes; no real framework/device adapter shipped |
 | `vendor/agentscope/` | Exact third-party v2.0.10 source snapshot; not first-party code |
 | `tools/vendor/` | Auditable one-time import tools |
 | `docs/` | Architectural boundaries and third-party provenance |

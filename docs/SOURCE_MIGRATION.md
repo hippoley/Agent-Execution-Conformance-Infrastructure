@@ -2,7 +2,7 @@
 
 ## Result
 
-The complete AgentScope `v2.0.10` source snapshot is present as ordinary files in `vendor/agentscope/` on this review branch. The old Git submodule and `.gitmodules` entry were removed. This copies the tagged source tree; it does not copy upstream commit history or make AECI an official AgentScope distribution.
+The complete AgentScope `v2.0.10` source snapshot is present as ordinary files in `vendor/agentscope/` on this review branch. The old Git submodule and `.gitmodules` entry were removed. This copies the tagged source tree; it does not copy upstream commit history or make AgentPanel an official AgentScope distribution.
 
 | Property | Verified value |
 | --- | --- |
@@ -30,6 +30,6 @@ The exact tree check is the primary completeness assertion. The import report re
 
 ## Scope boundary
 
-An ordinary-file snapshot makes source review independent of submodule initialization. It does not make Python dependencies, model services, Tuya APIs, ESP32 firmware, or device hardware available offline. No AgentScope runtime adapter, Tuya integration, or endorsement is implied. AECI-owned code remains outside `vendor/agentscope/`; upstream source and attribution must remain intact.
+An ordinary-file snapshot makes source review independent of submodule initialization. It does not make Python dependencies, model services, Tuya APIs, ESP32 firmware, or device hardware available offline. No AgentScope runtime adapter, Tuya integration, or endorsement is implied. Project-owned code remains outside `vendor/agentscope/`; upstream source and attribution must remain intact.
 
 See [the import evidence](AGENTSCOPE_V2_0_10_IMPORT_REPORT.md), [third-party attribution](THIRD_PARTY.md), and [vendoring procedure](development/AGENTSCOPE_VENDORING.md).

@@ -2,7 +2,7 @@
 
 ## Current thesis
 
-Within the AgentPanel system architecture, this repository should grow the contract and conformance boundary between the managed cloud agent runtime and physical device capabilities. AgentScope supplies an upstream runtime candidate; TuyaOpen and ESP32 supply the device/edge path. AECI tests the compatibility and outcome semantics between those independently evolving sides. It is not a competing agent runtime, device SDK, or production control plane.
+Within the AgentPanel system architecture, the repository may benefit from clear command contracts between the managed cloud agent runtime and physical device capabilities. AgentScope supplies an upstream runtime candidate; TuyaOpen and ESP32 supply the device/edge path. The current local test harness checks a simulator against those command semantics; it is an engineering aid, not a product layer, competing runtime, device SDK, or production control plane.
 
 The candidate gap is not another agent framework, IoT SDK, MCP replacement, policy engine, or general observability convention. It is a portable conformance profile for translating asynchronous agent operation outcomes into physical-effect outcomes: authorization, expiry, retries, cancellation races, ambiguous completion and read-after-write verification must remain distinguishable across runtimes and device transports.
 
@@ -55,7 +55,7 @@ An OpenClaw issue documented that MCP host cancellation could fail to reach an i
 - [OpenTelemetry GenAI conventions](https://opentelemetry.io/docs/specs/semconv/registry/attributes/gen-ai/) already cover agent/tool-call trace attributes. Reuse trace context and redact sensitive payloads instead of creating a parallel observability schema.
 - [TuyaOpen](https://github.com/tuya/tuyaopen) and its [ESP32 platform component](https://github.com/tuya/TuyaOpen-esp32) are the device stack to adapt, subject to board/release testing. Current public TuyaOpen issue traffic demonstrates ordinary device/SDK integration friction, but no reviewed issue yet proves demand for this conformance profile.
 
-The leverage hypothesis is that request/task status and physical effect disposition can diverge. Existing work already covers much of physical-action safety, so the only plausible independent contribution is interoperability evidence across MCP cancellation/task semantics and device-effect outcomes. The seven current vectors do not test this hypothesis. External demand remains unproven. Present this as an experimental test profile, not a new standard, until an independent adapter or maintainer validates it.
+The hypothesis is that request/task status and physical effect disposition can diverge. Existing work already covers much of physical-action safety, so a possible contribution is clearer interoperability evidence across MCP cancellation/task semantics and device-effect outcomes. The seven current vectors do not test this hypothesis. External demand remains unproven. Keep this as a local engineering test profile unless an independent adapter or maintainer validates its value.
 
 ## Next action
 

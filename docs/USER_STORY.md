@@ -8,7 +8,9 @@ A user story names an actor, a concrete trigger, an observable outcome, and a co
 
 ## Current product truth
 
-This repository's first executable slice is the AECI device-command contract, seven public fixtures, and a JavaScript reference simulator/adapter harness in `contracts/`, `fixtures/`, and `runners/`. It is not a Tuya adapter, authenticated device service, or hardware conformance result. AgentScope v2.0.10 is present as a complete source snapshot, but no AgentScope integration is implemented. No third party is known to consume these artifacts.
+The primary product story is: a business user requests an authorized action on a bound device through a managed cloud agent and receives the observed result, or an explicit failure/unknown outcome. See [the story catalog](USER_STORIES.md) for its acceptance boundary. The engineering stories below support that outcome; they are not standalone product commitments.
+
+The current executable slice is the device-command contract, seven fixtures, and a JavaScript reference simulator/test harness in `contracts/`, `fixtures/`, and `runners/`. These are development/test assets, not a standalone product or runtime layer. They do not constitute a Tuya adapter, authenticated device service, or hardware conformance result. AgentScope v2.0.10 is present as a complete source snapshot, but no AgentScope integration is implemented. No third party is known to consume these artifacts.
 
 ## Story 1: independently check a bounded device command contract
 
@@ -18,7 +20,7 @@ This repository's first executable slice is the AECI device-command contract, se
 
 ## Story 2: reproduce the imported upstream source
 
-> As a **repository maintainer**, when I check out this review branch, I need AgentScope v2.0.10 to exist as ordinary files with a verifiable upstream tree identity and preserved license, so that source review and AECI changes do not depend on an initialized submodule. I can verify this when `vendor/agentscope` has tree `11d2173f891739d3e359af892eb576751a0a85f8`, contains the upstream Apache-2.0 license, and has no gitlink; it fails when any of those checks differ.
+> As a **repository maintainer**, when I check out this review branch, I need AgentScope v2.0.10 to exist as ordinary files with a verifiable upstream tree identity and preserved license, so that source review and project changes do not depend on an initialized submodule. I can verify this when `vendor/agentscope` has tree `11d2173f891739d3e359af892eb576751a0a85f8`, contains the upstream Apache-2.0 license, and has no gitlink; it fails when any of those checks differ.
 
 **Current evidence:** exact tree, license, source syntax and basic package import have been checked locally on the review branch. The upstream pytest suite was not run because its development dependencies are not installed. The branch has not been merged to `main`.
 
@@ -36,4 +38,4 @@ This repository's first executable slice is the AECI device-command contract, se
 
 ## Decision gate
 
-Do not expand the profile before one independent adapter can run its current vectors. Add cancellation and crash-window cases only when they can be specified as transport-neutral observable outcomes. Start a TuyaOpen/ESP32 integration only after selecting a real supported board and confirming its command, identity, and readback paths. Reconsider the profile if an existing adopted conformance suite already covers the same semantics or independent maintainers find no value in the vectors.
+Prioritize one AgentScope-to-device integration over expanding the test profile. Select a supported TuyaOpen/ESP32 board and confirm its identity, command, and readback paths before claiming hardware support. Use existing vectors as regression checks and add cases when real integration failures justify them. Independent adoption is a gate for publishing a separate conformance product, not a prerequisite for implementing AgentPanel.

@@ -4,7 +4,7 @@
 
 The target is a provider-neutral managed agent platform with an IoT execution edge. A business client or device event invokes a versioned cloud agent through a stable contract. The cloud owns identity, reasoning, planning, knowledge, policy, evaluation, and usage evidence. Tuya Cloud is the device/product connectivity plane; ESP32 is a resource-constrained deterministic executor for wake-word/audio capture, local state, playback, and explicitly authorized device actions. AgentScope is one cloud execution provider, not the platform boundary.
 
-**Project scope:** this is the destination architecture for AgentPanel. The repository grows into it in verified slices; the current slice is the AECI contract, public fixtures, and reference runner. AgentScope is the first imported cloud runtime candidate, while its runtime adapter, the managed-agent control plane, Tuya services, and ESP32 firmware are not yet integrated. The conformance harness validates adapter behavior at development/test time; it is not a production authorization service.
+**Project scope:** this is the destination architecture for AgentPanel. The repository grows into it in verified slices. The current executable artifact is a local device-command contract test harness; it validates a limited simulator behavior at development/test time and is not a product layer or production authorization service. AgentScope is the first imported cloud runtime candidate, while its runtime adapter, the managed-agent control plane, Tuya services, and ESP32 firmware are not yet integrated.
 
 ## Re-drawn architecture
 
@@ -73,14 +73,6 @@ flowchart TB
     OTEL[(OpenTelemetry)]
   end
 
-  subgraph AECI[AECI conformance plane - development and test time]
-    PROFILE[Versioned command and event contracts]
-    VECTORS[Public fixtures and negative cases]
-    RUNNER[Adapter harness and reference simulator]
-    REPORT[Machine-readable conformance report]
-    PROFILE --> VECTORS --> RUNNER --> REPORT
-  end
-
   IDE & SDK & CLI & SSE & IM & CRON --> AUTH --> ROUTE --> CONTRACT
   MIC --> DEVICE
   DEVICE --> CAP
@@ -107,9 +99,9 @@ flowchart TB
   SESSION --> EVAL --> FLEET
   SESSION --> USAGE
   SESSION --> OTEL
-  RUNNER -. validates adapter contract .-> AS
-  RUNNER -. validates device behavior .-> CAP
 ```
+
+The local contract, fixtures, and runner are used outside this system diagram during development and testing. They do not run in the production request path.
 
 ## Boundary rules
 
@@ -135,7 +127,7 @@ flowchart TB
 | S5 | Evaluate, roll out, coordinate, and meter | trace-linked score, version decision, usage record |
 | S6 | Connect a Tuya/ESP32 device as a constrained executor | paired identity, signed command envelope, device MCP conformance trace, physical-state verification |
 
-The AECI conformance plane is a test-time cross-cutting capability, not another production service in the request path. Its present scope is the device-command contract and simulator vectors; the AgentScope adapter and hardware adapter tests remain future work.
+The repository's current test harness covers only the device-command contract against a simulator. It does not validate an AgentScope adapter, a Tuya transport, or physical hardware; those integrations and their tests remain future work.
 
 ## External design references
 

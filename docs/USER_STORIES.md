@@ -2,9 +2,15 @@
 
 ## Product story
 
+> As a business user, I want to ask a managed cloud agent to perform an authorized action on my bound device and receive its observed result, so I can complete a task without learning the device protocol or mistaking command acceptance for physical completion.
+
+Acceptance requires a bound device identity, capability authorization, a traceable command, and observed state or an explicit unverified/failed outcome. This end-to-end story is not implemented yet. AgentScope, Tuya connectivity, and ESP32 execution should supply the existing runtime and device capabilities rather than being rebuilt here.
+
+## Supporting engineering story
+
 > As a maintainer of an agent-to-device integration, when an agent invokes a physical capability through MCP or a provider tool API, I need a portable test profile that checks authorization, expiry, retries, cancellation races and observed device state, so that an API-level success cannot be mistaken for a safe physical outcome. I accept the profile when an independent adapter can run the public fixtures and produce the same outcome classifications without importing this repository's simulator.
 
-This is the first testable infrastructure capability inside the AgentPanel system architecture, not the whole platform. The broader stories below name the outcomes the managed-agent control plane and Tuya/ESP32 edge must eventually support; they do not imply that those services are implemented here or that this project should replace AgentScope or TuyaOpen.
+This supporting story describes development checks, not another product. The broader stories below name the outcomes the managed-agent control plane and Tuya/ESP32 edge must eventually support; they do not imply that those services are implemented here or that this project should replace AgentScope or TuyaOpen.
 
 ## Architecture mapping
 
@@ -12,9 +18,9 @@ This is the first testable infrastructure capability inside the AgentPanel syste
 | --- | --- | --- |
 | M1-M14 | Managed Agents control plane, runtime and governance | Product requirements; not implemented services. |
 | D1-D7 | Tuya device plane and ESP32 execution edge | Product requirements; no real device adapter or board validation. |
-| C1-C4 | AECI conformance plane between cloud-agent adapters and device adapters | Current project slice: C1/C2 have simulator evidence; C3/C4 remain unimplemented. |
+| C1-C4 | Development/test-time checks for the device-command boundary | Current project slice: C1/C2 have simulator evidence; C3/C4 remain unimplemented. |
 
-The AECI harness is test-time infrastructure. It checks that future adapters preserve the command and outcome contract; it does not sit as an extra production service on every device request.
+The harness is an internal validation tool. It checks simulator behavior against the command and outcome contract; it does not sit as a product or production service on device requests, and it does not yet validate real framework/device adapters.
 
 ## Repository-owned conformance stories
 

@@ -2,12 +2,12 @@
 
 ## What exists
 
-AgentPanel is the target managed-agent and IoT system. AECI is its first executable infrastructure slice: a conformance profile for agent-to-device commands. The current runnable slice consists of:
+AgentPanel is the managed-agent and IoT system described by the target architecture. The current repository contains a small development/test harness for the device-command boundary. It is not a separately deployed product or an additional layer in that architecture. The current runnable slice consists of:
 
 - a transport-neutral device-command envelope and schemas in `contracts/`;
 - a JavaScript reference simulator and adapter conformance runner in `runners/`;
 - seven machine-readable command vectors in `fixtures/device-command/`;
-- a complete AgentScope v2.0.10 source snapshot under `vendor/agentscope/`, kept separate from AECI-owned code.
+- a complete AgentScope v2.0.10 source snapshot under `vendor/agentscope/`, kept separate from project-owned code.
 
 The simulator exercises allow/deny, identity and capability checks, expiry, duplicate delivery, idempotency-key reuse and readback outcomes. It is test evidence for contract behavior, not a real device, production policy service or authenticated transport. The full customer system remains a target architecture.
 
@@ -17,7 +17,7 @@ When an agent asks a device to act, an API-level accepted/completed state can di
 
 ## Architecture views
 
-- [System architecture](ARCHITECTURE.md): the canonical AgentPanel target and the AECI conformance layer within it.
+- [System architecture](ARCHITECTURE.md): the canonical AgentPanel target architecture. The local command tests are described separately as development assets.
 - [Implementation status](IMPLEMENTATION_STATUS.md): code ownership and evidence boundary for what runs today.
 
 The system diagram is kept in one canonical document so product overview does not duplicate it.
@@ -26,7 +26,7 @@ The system diagram is kept in one canonical document so product overview does no
 
 | Area | User outcome | State |
 | --- | --- | --- |
-| Command conformance | Another adapter can classify bounded command outcomes from public vectors. | Partial local simulator; no independent adapter. |
+| Device-command checks | The project can detect regressions in bounded command outcomes using local vectors. | Partial local simulator; no independent adapter. |
 | AgentScope source baseline | Reviewers can inspect the pinned upstream source without a submodule. | Complete on this review branch; not merged to `main`. |
 | AgentScope runtime adapter | Run the same contract through AgentScope. | Not implemented. |
 | TuyaOpen / ESP32 device path | Deliver an authenticated bounded action and verify device state. | Target only; no hardware validation. |
