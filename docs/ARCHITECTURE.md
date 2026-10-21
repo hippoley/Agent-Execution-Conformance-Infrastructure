@@ -103,6 +103,12 @@ flowchart TB
 
 The local contract, fixtures, and runner are used outside this system diagram during development and testing. They do not run in the production request path.
 
+## Security and evidence boundaries
+
+**Code sandbox ≠ device sandbox ≠ production execution boundary.** An AgentScope workspace isolates code only to the extent verified by its actual deployment; simulated device state is a test fixture, not independent physical observation. A production write must pass a separate trusted identity/policy gateway. A Tuya cloud ACK does not establish physical completion, and not every capability has independently observable postconditions.
+
+The system diagram below is the **target design**. The current repository does not deploy its control-plane boxes, sandbox isolation, AgentScope integration or hardware services. The local conformance runner is only a development/test utility, and must never be mistaken for a production authorization service.
+
 ## Boundary rules
 
 1. **Access is transport, not business logic.** Every entry point maps to the same request and event contract.

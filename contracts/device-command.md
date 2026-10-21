@@ -19,7 +19,7 @@ This contract defines the safety-relevant boundary between a cloud agent and a p
 }
 ```
 
-The authenticated transport identity must match `tenant_id` and `device_id`; fields in the payload are not authentication. A policy decision must authorize the capability and arguments for the principal before dispatch.
+The authenticated transport identity must match `tenant_id` and `device_id`; fields in the payload are not authentication. A policy decision must authorize the capability and arguments for the principal before dispatch. In this reference harness, `principal.authenticated` must be the literal boolean `true`, IDs must be nonempty strings, and `capabilities` must be a Set. The harness does not authenticate users; production systems must obtain these facts from a trusted identity boundary.
 
 ## Required execution semantics
 

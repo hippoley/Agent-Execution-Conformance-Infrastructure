@@ -2,7 +2,7 @@
 
 ## Result
 
-The complete AgentScope v2.0.10 source tree is committed in `vendor/agentscope/` as ordinary files on `refactor/coherent-conformance-layout`, and the consolidated conformance slice has been pushed to that remote review branch. The old gitlink and `.gitmodules` entry are removed. The change is not merged to `main`. This is a source snapshot; it does not include the upstream commit history or imply endorsement.
+The complete AgentScope v2.0.10 source tree is committed in `vendor/agentscope/` as ordinary files on `refactor/coherent-conformance-layout`, and the consolidated conformance slice has been pushed to that remote review branch. The old gitlink and `.gitmodules` entry are removed. The import was subsequently included in consolidated `main` (2026-10-21). This is a source snapshot; it does not include the upstream commit history or imply endorsement.
 
 | Check | Evidence |
 | --- | --- |
@@ -25,4 +25,4 @@ The complete AgentScope v2.0.10 source tree is committed in `vendor/agentscope/`
 
 - AgentScope's full upstream pytest suite was not run: `pytest` and the project's development dependency set are not installed in this environment.
 - No Tuya account, ESP32 board, device transport, model credentials or external service was configured. The import proves source completeness and a basic Python package import, not end-to-end runtime behavior.
-- The changes are pushed to the remote review branch, but are not merged to `main`.
+- The snapshot is now in `main`. The original report's local verification was performed during import, not re-run as part of this editorial change.

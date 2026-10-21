@@ -2,7 +2,7 @@
 
 ## Result
 
-The complete AgentScope `v2.0.10` source snapshot is present as ordinary files in `vendor/agentscope/` on this review branch. The old Git submodule and `.gitmodules` entry were removed. This copies the tagged source tree; it does not copy upstream commit history or make AgentPanel an official AgentScope distribution.
+The complete AgentScope `v2.0.10` source snapshot is present as ordinary files in `vendor/agentscope/` on the consolidated `main` branch. The old Git submodule and `.gitmodules` entry were removed. This copies the tagged source tree; it does not copy upstream commit history or make AgentPanel an official AgentScope distribution.
 
 | Property | Verified value |
 | --- | --- |
@@ -13,7 +13,7 @@ The complete AgentScope `v2.0.10` source snapshot is present as ordinary files i
 | Files | 1,178 ordinary files |
 | License | Upstream Apache-2.0 license retained |
 | Import commit | `cccc493` |
-| Review state | Consolidated commits are pushed to the remote review branch; not merged to `main` |
+| Current state | Included in `main` after 2026-10-21 branch consolidation; no submodule |
 
 ## Reproduce the checks
 

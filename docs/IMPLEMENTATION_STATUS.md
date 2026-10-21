@@ -1,31 +1,40 @@
-# Implementation Status
+# Implementation Status — 2026-10-21
 
-This page records what runs today. The intended system and layer boundaries are in [ARCHITECTURE.md](ARCHITECTURE.md).
+**This is the current source-of-truth for implementation claims.** See [ARCHITECTURE.md](ARCHITECTURE.md) for the target design; a drawn service is not implemented merely because it appears there.
 
-## Current vertical slice
+## Implemented / verifiable from repository content
 
-```text
-device-command contract + JSON Schema
-                 |
-                 v
-public fixtures -> adapter harness -> reference simulator -> JSON report
+| Asset | State | Boundaries |
+| --- | --- | --- |
+| `vendor/agentscope/` | Imported as ordinary files | Git tree `11d2173f891739d3e359af892eb576751a0a85f8`, upstream v2.0.10; license present; dependencies and services not bundled |
+| `contracts/device-command*` | v1 envelope/schema and semantics | Test contract, not production authorization |
+| `runners/device-command.mjs` | Local reference state-setting simulator | In-memory effect / dedup, opt-in JSON snapshot; does not actuate hardware |
+| `runners/conformance.mjs` | Public adapter test runner | Profile `agent-device-effect/0.3`: 10 deterministic JSON vectors |
+| `runners/*.test.mjs` | Local test sources | Core and capability-boundary regressions; run all files, not one subset |
+| `docs/` | Canonical product/system/stories/provenance | Documents planned capability separately from deployed code |
+
+The vendor subtree's exact tree identity was independently checked via the GitHub tree object on 2026-10-21. The new device validator and suite in this change need a **fresh complete checkout test run**; their presence alone is not an execution result. Historical import report refers to verification on its original branch.
+
+## Not implemented / unverified
+
+- **AgentScope execution integration:** imported source has not been wired into an AgentPanel session/tool loop.
+- **Managed-agent services M1–M14:** product requirements; no complete deployed control plane.
+- **Tuya IoT / TuyaOpen / ESP32 D1–D7:** no real credentials, paired board, end-to-end command, readback, offline handling or firmware proof.
+- **Conformance C3/C4:** no cancellation disposition, multiprocess crash-window reconciliation or real external outcome oracle.
+- **Sandbox isolation:** no live process/filesystem/network isolation acceptance.
+- **Security:** injected `principal.authenticated` is not proof of IAM, cryptographic identity or policy enforcement.
+- **External adoption:** no independently maintained adapter or downstream dependency confirmed.
+
+## Verification commands
+
+```bash
+node --test runners/*.test.mjs
+node runners/conformance.mjs runners/device-command.mjs
+bash tools/verify_release.sh
 ```
 
-The contract and harness are development/test-time assets. No component in this slice authenticates a real user or device, contacts Tuya, invokes AgentScope, or changes physical state.
+Do not run GitHub Actions unless a code change strictly requires a remote-only verification. The full AgentScope pytest suite is not claimed to have passed.
 
-## Directory ownership
+## Next acceptance gate
 
-| Path | Responsibility | Status |
-| --- | --- | --- |
-| `contracts/` | Device-command, adapter, execution-trace and report contracts | Command profile is executable against the reference simulator; lifecycle trace remains design-only. |
-| `fixtures/` | Deterministic valid, denied, expired and replay cases | Nine device-command vectors run locally. |
-| `runners/` | Reference simulator and adapter conformance CLI | JavaScript implementation; no generic agent lifecycle runner yet. |
-| `adapters/` | Framework/device integration boundary | Documentation only; no AgentScope or Tuya adapter. |
-| `vendor/agentscope/` | Exact upstream v2.0.10 source snapshot | Complete source and license retained; not wired into this project. |
-| `tools/vendor/` | One-time source import tooling | Historical reproduction path; import already completed on this branch. |
-| `tools/verify_release.sh` | Local source and conformance verification | Runs without GitHub Actions; see [import report](AGENTSCOPE_V2_0_10_IMPORT_REPORT.md). |
-| `docs/` | System architecture, product stories, implementation truth and provenance | The system target and implemented slice are explicitly distinguished. |
-
-## Known limits
-
-The simulator checks expiry, injected principal/device binding, capability allowlisting, idempotency and readback against a fake device. It does not provide real authentication, transport delivery, crash-safe persistence, cancellation reconciliation, or physical-state evidence. No third party is recorded as consuming the profile. See [the position review](POSITION_REVIEW.md) for the next falsifiable gate.
+Build an isolated local fake Tuya service and a thin AgentScope adapter without altering `vendor/agentscope/`. Demonstrate a real tool invocation and verify its result from an independently owned state store. Then permit *only low-risk test hardware* behind authenticated, scoped tool access. A green unit suite or an ACK alone never closes the hardware story.

@@ -1,44 +1,42 @@
-# Product Overview
+# AgentPanel — Product Overview
 
-## What exists
+## Product proposition
 
-AgentPanel is the managed-agent and IoT system described by the target architecture. The current repository contains a small development/test harness for the device-command boundary. It is not a separately deployed product or an additional layer in that architecture. The current runnable slice consists of:
+A managed Agent can request a **bounded and authorized action** on a business or IoT resource, then receive a traceable classification of the *observed outcome* instead of treating an API acknowledgement as physical completion.
 
-- a transport-neutral device-command envelope and schemas in `contracts/`;
-- a JavaScript reference simulator and adapter conformance runner in `runners/`;
-- seven machine-readable command vectors in `fixtures/device-command/`;
-- a complete AgentScope v2.0.10 source snapshot under `vendor/agentscope/`, kept separate from project-owned code.
+This is a target product, **not yet a deployed platform**. The present repository ships an upstream AgentScope v2.0.10 **source snapshot** and a small reference simulator / conformance development suite. It does not ship a real AgentScope↔Tuya integration, managed control plane, hardware adapter, production sandbox or independent hardware verification.
 
-The simulator exercises allow/deny, identity and capability checks, expiry, duplicate delivery, idempotency-key reuse and readback outcomes. It is test evidence for contract behavior, not a real device, production policy service or authenticated transport. The full customer system remains a target architecture.
+## One valuable first scenario
 
-## Product hypothesis
+A business event or approved user request asks an Agent to set a low-risk device state.
 
-When an agent asks a device to act, an API-level accepted/completed state can diverge from the physical effect. A reusable profile may help adapter maintainers keep authorization, expiry, retries, cancellation and observed outcome semantics explicit across agent frameworks and device transports. The hypothesis remains unproven until an independent adapter uses the fixtures; no external adoption is recorded.
+1. AgentScope formulates a typed, bounded tool request.
+2. Device identity, capability and parameter policy are checked at an independent trusted gateway.
+3. A simulated device path can validate behavior without production access.
+4. A separately authorized live adapter dispatches to a **test** device.
+5. The outcome is classified as completed, failed, unverified or unknown using authoritative observations; no fabricated physical success.
 
-## Architecture views
+**The current executable code only exercises part of steps 2–3 with injected test identity**, not the complete chain.
 
-- [System architecture](ARCHITECTURE.md): the canonical AgentPanel target architecture. The local command tests are described separately as development assets.
-- [Implementation status](IMPLEMENTATION_STATUS.md): code ownership and evidence boundary for what runs today.
+## Reuse, don't reimplement
 
-The system diagram is kept in one canonical document so product overview does not duplicate it.
+- AgentScope: reasoning, tools, session/runtime foundations and supported workspaces.
+- TuyaOpen / supported Tuya APIs: device connectivity, pairing, device-specific datapoints and firmware path.
+- Existing IAM, audit and sandbox components: deploy proven systems rather than a homemade privileged shell.
+- The project owns only the minimal integration and evaluation surface demonstrated by real user outcomes.
 
-## Story map
+## Boundaries
 
-| Area | User outcome | State |
-| --- | --- | --- |
-| Device-command checks | The project can detect regressions in bounded command outcomes using local vectors. | Partial local simulator; no independent adapter. |
-| AgentScope source baseline | Reviewers can inspect the pinned upstream source without a submodule. | Complete on this review branch; not merged to `main`. |
-| AgentScope runtime adapter | Run the same contract through AgentScope. | Not implemented. |
-| TuyaOpen / ESP32 device path | Deliver an authenticated bounded action and verify device state. | Target only; no hardware validation. |
-| Managed Agent platform (M1-M14) | Publish, run, govern and meter tenant-scoped agents. | Customer requirements, not repository implementation. |
+- **Product system:** see [ARCHITECTURE.md](ARCHITECTURE.md), the one canonical AgentPanel diagram.
+- **Actual build:** see [IMPLEMENTATION_STATUS.md](IMPLEMENTATION_STATUS.md).
+- **User requirements:** see [USER_STORIES.md](USER_STORIES.md).
+- **Evidence:** see [primary story](USER_STORY.md), [local audit](audits/2026-10-21-capability-boundary-closure.md) and [pinned source record](AGENTSCOPE_V2_0_10_IMPORT_REPORT.md).
+- **External adoption and real device proof:** not yet recorded. A passing simulator fixture is not a hardware certification.
 
-Detailed actors, acceptance criteria and failure boundaries are in [USER_STORIES.md](USER_STORIES.md). The single primary story and proof gates are in [USER_STORY.md](USER_STORY.md). Strategic assumptions and falsifiers are in [POSITION_REVIEW.md](POSITION_REVIEW.md).
+## Success gates
 
-## Evidence ladder
-
-1. **Local contract evidence:** current reference simulator passes seven vectors and the harness detects a deliberately false-success adapter. Test identity is injected; no real principal is authenticated.
-2. **Independent implementation:** a separately maintained adapter passes the published fixtures without importing this code. Not yet achieved.
-3. **Hardware evidence:** one named ESP32 board and pinned TuyaOpen release execute safe commands with traceable result/readback. Not yet achieved.
-4. **External adoption:** a third-party issue, PR, dependency, citation, or documented deployment refers to a released contract version. Not yet achieved.
-
-Claims must stop at the highest completed level. See [the position review](POSITION_REVIEW.md) for current falsifiers and next gates.
+1. At least one end-to-end AgentScope tool request against an independently controlled fake device service.
+2. An actual approved low-risk Tuya/ESP32 test device with independently verified state, without raw credentials in the model context.
+3. Negative probes for wrong device, expired operation, permission denial, unreadable status and ACK ambiguity.
+4. A documented business workflow whose measurable outcome is better than a direct deterministic API call.
+5. Only then broaden device types, providers and managed-agent UI, if needed.

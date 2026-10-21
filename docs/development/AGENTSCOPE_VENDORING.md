@@ -1,6 +1,6 @@
 # AgentScope v2.0.10 complete source import
 
-The one-time import replaces the *temporary* `third_party/agentscope` gitlink with a full `vendor/agentscope` directory containing the **exact tagged upstream source**. It has been completed on the review branch; the import commit is `cccc493`.
+The one-time import replaces the *temporary* legacy `upstream/agentscope` gitlink with a full `vendor/agentscope` directory containing the **exact tagged upstream source**. It has been completed and integrated into `main`; the original import commit is `cccc493`.
 
 Pinned Git identifiers:
 
@@ -25,4 +25,4 @@ node runners/conformance.mjs runners/device-command.mjs
 
 The pinned source tree and license, conformance tests/CLI, source syntax and basic AgentScope package import have been verified. The full upstream test suite still requires its development dependencies and service-specific test environment. Import success does not prove runtime compatibility with Tuya, ESP32, model APIs or external services.
 
-No GitHub Actions, workflow dispatch or merge were needed for this import. See [the recorded import evidence](../AGENTSCOPE_V2_0_10_IMPORT_REPORT.md). Merge remains a separate review decision.
+No GitHub Actions, workflow dispatch or merge were needed for this import. See [the recorded import evidence](../AGENTSCOPE_V2_0_10_IMPORT_REPORT.md). The source import is already contained in consolidated `main`. This historical script is retained for reproducibility, not as a command to run on the current source tree.

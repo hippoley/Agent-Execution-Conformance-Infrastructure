@@ -1,35 +1,48 @@
 # AgentPanel
 
-AgentPanel is a managed-agent and IoT system project centered on the customer architecture in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md). AgentScope is the first cloud runtime candidate; TuyaOpen and ESP32 define the device path. The repository currently includes a small device-command contract and local test harness to check assumptions during development. They are validation assets, not a separate product, production service, or runtime layer.
+**Managed Agent + IoT execution integration** built on a pinned AgentScope source baseline and a future TuyaOpen / ESP32 device path. The repository URL retains its historical AECI name; **AgentPanel is the product**, and the command conformance runner is a development tool—not a second platform, production policy service, or separate runtime layer.
 
-## Current progress (read before use)
+## What runs today (2026-10-21)
 
-- Device-command checks in `contracts/`, `runners/`, and `fixtures/`: local reference simulator and nine vectors; no real adapter or physical device.
-- AgentScope `v2.0.10` full source: **imported as ordinary files** as ordinary files at `vendor/agentscope/`; exact upstream tree SHA verified. The authoritative development baseline is `main` after consolidation.
-- One-time exact release import script: `tools/vendor/import_agentscope_v2.sh`.
-- Tuya/AgentScope integration adapters, physical confirmation, durable idempotency: **NOT IMPLEMENTED**.
+| Component | Status | Honest evidence |
+| --- | --- | --- |
+| AgentScope v2.0.10 source snapshot | **Imported** | 1,178 ordinary tracked files at `vendor/agentscope/`; Git tree `11d2173f891739d3e359af892eb576751a0a85f8` (verified on the consolidated `main` tree) |
+| Device command / reference simulator | **Runnable locally** | Versioned `agent-device-effect/0.3` fixture profile with 10 vectors, including malformed authentication context |
+| AgentScope runtime / managed control plane | **Not integrated** | Source presence is not a runnable enterprise agent platform |
+| Tuya API, TuyaOpen, ESP32 | **Not integrated** | No paired device, real actuation or independent physical readback |
+| Production sandbox / identity / durable execution | **Not implemented here** | Simulator principal is injected; a saved snapshot is not crash-safe execution |
+| Independent adoption | **Not verified** | No confirmed third-party adapter or usage |
 
-## Local smoke tests (free; no Actions)
+## Fast local verification (no cloud account and no GitHub Actions)
+
+Requires Node.js 22+ for the development harness and Git for the pinned source check:
 
 ```bash
-node --test runners/device-command.test.mjs
+node --test runners/*.test.mjs
 node runners/conformance.mjs runners/device-command.mjs
+bash tools/verify_release.sh
 ```
 
-## Imported AgentScope source
+The first command includes both the core device tests **and** capability-boundary regression tests. The second emits machine-readable JSON and exits nonzero on any mismatch. The release script checks the committed AgentScope source tree, attribution prerequisites, and the local test profile. These commands do **not** exercise AgentScope's full upstream test suite, a secure sandbox, real identity provider, Tuya or ESP32.
 
-The official release snapshot is `v2.0.10` (released 2026-10-12): commit `e6c014f0be49b2a6f6f62a9453082a0b975484e1`, tree `11d2173f891739d3e359af892eb576751a0a85f8`. All 1,178 files are ordinary Git files, not a submodule; the original Apache-2.0 `LICENSE` is preserved. Verification details are in [the import report](docs/AGENTSCOPE_V2_0_10_IMPORT_REPORT.md).
+## Architecture and ownership
 
-The one-time importer and fail-closed verifier are retained under `tools/vendor/` and `tools/verify_release.sh`. The importer was updated for Windows Git Bash root detection, verifies the pinned tag/tree before changing the index, and commits locally; it does not push, merge or run CI. The source snapshot is complete, but its Python dependencies, external services and model APIs are not bundled, so this is not an offline-runtime claim.
+- [Canonical AgentPanel architecture](docs/ARCHITECTURE.md) — target system design; not a claim that all boxes run.
+- [Implementation truth](docs/IMPLEMENTATION_STATUS.md) — delivered versus blocked, updated per release.
+- [User stories and acceptance](docs/USER_STORIES.md) — M1–M14 platform, D1–D7 device, C1–C4 development conformance; unfinished items remain open.
+- [Primary vertical slice](docs/USER_STORY.md) — first independently testable business/device outcome.
+- [Third-party provenance](docs/THIRD_PARTY.md) and [exact-source evidence](docs/AGENTSCOPE_V2_0_10_IMPORT_REPORT.md).
 
-## Ownership structure
-
-| Directory | Ownership / responsibility |
+| Path | Ownership |
 | --- | --- |
-| `contracts/`, `fixtures/`, `runners/` | Development/test-time command contract checks, vectors, and reference simulator |
-| `adapters/` | Integration boundary notes; no real framework/device adapter shipped |
-| `vendor/agentscope/` | Exact third-party v2.0.10 source snapshot; not first-party code |
-| `tools/vendor/` | Auditable one-time import tools |
-| `docs/` | Architectural boundaries and third-party provenance |
+| `vendor/agentscope/` | Immutable **third-party** upstream snapshot, Apache-2.0 license retained |
+| `contracts/`, `fixtures/`, `runners/` | First-party **development tests** and reference simulator |
+| `adapters/` | Integration interface notes only; no real adapters yet |
+| `tools/` | Pinned source import and local fail-closed verification |
+| `docs/` | Canonical architecture, evidence limits, roadmap and historical audit |
 
-See the [AgentPanel system architecture](docs/ARCHITECTURE.md), [current implementation status](docs/IMPLEMENTATION_STATUS.md), [user stories](docs/USER_STORIES.md), and [provenance](docs/THIRD_PARTY.md). No affiliation with or endorsement from AgentScope or Tuya is claimed.
+## What to build next
+
+First prove **one AgentScope → constrained capability → test device / fake Tuya API → externally observed outcome** path, using deny-by-default permissions and separate simulated versus live modes. Prioritize one safe low-risk device. Only after this gate, prove cancellation/crash reconciliation, real identity, and sandbox isolation. Do not start with another general agent admin UI, new workflow engine, large vendor fork, or unrestricted physical control.
+
+**Safety:** no production credentials in prompts/traces/fixtures; do not connect this reference simulator directly to privileged real actuators. Cloud API acknowledgement is not physical completion. No affiliation with or endorsement by AgentScope or Tuya is claimed.

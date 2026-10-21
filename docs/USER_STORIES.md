@@ -18,7 +18,7 @@ This supporting story describes development checks, not another product. The bro
 | --- | --- | --- |
 | M1-M14 | Managed Agents control plane, runtime and governance | Product requirements; not implemented services. |
 | D1-D7 | Tuya device plane and ESP32 execution edge | Product requirements; no real device adapter or board validation. |
-| C1-C4 | Development/test-time checks for the device-command boundary | Current project slice: C1/C2 have simulator evidence; C3/C4 remain unimplemented. |
+| C1-C4 | Development/test-time checks for the device-command boundary | Current project slice: C1/C2 have simulator-only development evidence; C3/C4 remain unimplemented. |
 
 The harness is an internal validation tool. It checks simulator behavior against the command and outcome contract; it does not sit as a product or production service on device requests, and it does not yet validate real framework/device adapters.
 
@@ -26,7 +26,7 @@ The harness is an internal validation tool. It checks simulator behavior against
 
 | ID | Story | Acceptance evidence | Failure boundary | State |
 | --- | --- | --- | --- | --- |
-| C1 Profile reuse | As an adapter maintainer, I can run public command vectors against my own adapter, so I can check compatibility without importing the reference simulator. | Versioned fixtures, documented adapter interface, JSON report and non-zero exit on a deliberate false-success adapter. | Harness requires project internals or accepts a false-success result. | Partial: 9 vectors and local harness exist; no real adapter or device evidence. |
+| C1 Profile reuse | As an adapter maintainer, I can run public command vectors against my own adapter, so I can check compatibility without importing the reference simulator. | Versioned fixtures, documented adapter interface, JSON report and non-zero exit on a deliberate false-success adapter. | Harness requires project internals or accepts a false-success result. | Partial: 10 versioned vectors and local harness exist; no real adapter or device evidence. Full suite re-execution pending. |
 | C2 Effect outcome | As an operator, I can distinguish accepted/executing from observed physical success, so I do not report a requested effect as completed without evidence. | State-setting command returns `succeeded` only with postcondition evidence; missing readback is `unverified`. | Transport/API acknowledgement is treated as physical completion. | Simulator only. |
 | C3 Cancellation disposition | As a user/operator, when an in-flight tool/task is cancelled, I can learn whether the physical action was prevented, stopped, already completed, or remains unknown, so cancellation UI does not imply rollback. | MCP cancellation reaches an adapter; race vectors assert both operation state and effect state/disposition. | Cancelled request is represented as proof that the physical effect did not happen. | Not implemented. |
 | C4 Crash reconciliation | As an operator, after a process/device restart during a command, I can reconcile an ambiguous effect before retrying, so a timeout cannot double-actuate. | Fault injection between dispatch, effect, readback and record persistence yields `unknown` plus a reconciliation-required state, never blind retry. | The system automatically retries an ambiguous non-idempotent effect. | Not implemented. |

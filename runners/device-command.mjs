@@ -34,7 +34,13 @@ export function validateCommand(command, principal, now) {
     return { state: "denied", code: "INVALID_ENVELOPE" };
   }
   if (command.schema_version !== "1") return { state: "denied", code: "UNSUPPORTED_VERSION" };
-  if (!principal?.authenticated || !principal.tenantId || !principal.deviceId) {
+  // The harness supplies a trusted test principal; malformed contexts must
+  // fail closed rather than treating a truthy string as authentication or
+  // throwing when capabilities is not a Set.
+  if (principal?.authenticated !== true
+      || typeof principal.tenantId !== "string" || principal.tenantId.length === 0
+      || typeof principal.deviceId !== "string" || principal.deviceId.length === 0
+      || !(principal.capabilities instanceof Set)) {
     return { state: "denied", code: "UNAUTHENTICATED" };
   }
   if (command.tenant_id !== principal.tenantId || command.device_id !== principal.deviceId) {

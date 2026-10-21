@@ -17,7 +17,7 @@ Run the published adapter conformance profile with the reference implementation:
 node runners/conformance.mjs runners/device-command.mjs
 ```
 
-An independent adapter exports `createDevice({ initialState })` as defined in [`contracts/device-adapter.md`](../contracts/device-adapter.md). The vectors live in [`fixtures/device-command/conformance.json`](../fixtures/device-command/conformance.json); the CLI emits JSON and exits non-zero when any vector fails.
+An independent adapter exports `createDevice({ initialState })` as defined in [`contracts/device-adapter.md`](../contracts/device-adapter.md). Faulting third-party adapters are recorded as failed vectors with `ADAPTER_ERROR` instead of crashing the whole JSON report; timeouts and process isolation remain separate unimplemented gates. The vectors live in [`fixtures/device-command/conformance.json`](../fixtures/device-command/conformance.json); the CLI emits JSON and exits non-zero when any vector fails.
 
 It is a contract reference, not a claim that a physical device or Tuya account has been tested. The accepted result means policy and envelope checks passed; it does not mean the physical state changed.
 

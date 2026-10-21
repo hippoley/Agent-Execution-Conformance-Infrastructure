@@ -1,6 +1,6 @@
 # Documentation Map
 
-The project follows the AgentPanel system architecture. The current repository is its first conformance slice, not the complete managed-agent platform.
+The project follows the AgentPanel system architecture. The current repository contains the first device-command development harness and a pinned upstream source snapshot; it is not yet a deployed managed-agent platform.
 
 Read in this order:
 

@@ -23,7 +23,7 @@ export function createDevice({ initialState }) {
 
 ## Conformance result
 
-Each vector records its ID, input fixture, trusted identity, clock, optional repeated requests/faults, expected outcome state/code, and whether a physical state change is expected. A conformant adapter reports outcomes consistent with the vector and exposes state for verification. The harness prints one JSON result per vector matching [`conformance-report.schema.json`](conformance-report.schema.json) and exits non-zero if any assertion fails.
+Each vector records its ID, input fixture, trusted identity, clock, optional repeated requests/faults, expected outcome state/code, and whether a physical state change is expected. A conformant adapter reports outcomes consistent with the vector and exposes state for verification. If an adapter throws or returns a malformed state snapshot, the harness emits a failed vector with stable code `ADAPTER_ERROR` (no exception text or credentials) and continues testing other vectors. This in-process harness does not enforce hard timeouts or sandbox isolation. The harness prints one JSON result per vector matching [`conformance-report.schema.json`](conformance-report.schema.json) and exits non-zero if any assertion fails.
 
 ## Limits
 

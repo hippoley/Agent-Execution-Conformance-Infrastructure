@@ -17,9 +17,9 @@ fi
 if git ls-files --stage -- third_party/agentscope | grep -q '^160000 '; then
   fail 'Old AgentScope gitlink still tracked'
 fi
-node --test runners/device-command.test.mjs || fail 'Device-command tests failed'
+node --test runners/*.test.mjs || fail 'Device-command tests failed'
 node runners/conformance.mjs runners/device-command.mjs || fail 'Reference adapter conformance failed'
 echo 'PASS: exact v2.0.10 committed source tree + original license'
 echo 'PASS: no old AgentScope submodule, no nested vendor gitlinks'
-echo 'PASS: device-command tests and seven public conformance vectors'
+echo 'PASS: all device-command test files and current public conformance vectors'
 echo 'MANUAL GATE STILL REQUIRED: upstream runtime tests and attribution review'

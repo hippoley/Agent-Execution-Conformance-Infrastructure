@@ -15,9 +15,9 @@ This is a useful infrastructure candidate because a stronger model does not remo
 - The simulated device stores idempotency records and state snapshots; a repeated command is classified without repeating the modeled effect, including after restoration from a saved snapshot.
 - Reuse of an idempotency key with changed command content is rejected.
 - Concurrent duplicate deliveries produce one modeled state transition in the in-process simulator.
-- A public adapter interface, seven machine-readable conformance vectors, and a CLI report work against the reference simulator; a deliberately false-success adapter is detected as non-conformant.
+- A public adapter interface, ten machine-readable conformance vectors, and a CLI report work against the reference simulator; a deliberately false-success adapter is detected as non-conformant.
 - Acceptance is explicitly distinct from physical success.
-- Twelve local tests pass with Node's built-in test runner and no model key, Tuya account or hardware.
+- Earlier Node test results established the baseline. Current consolidated tests include strict typed-principal checks and must be rerun from a fresh checkout; no full-branch pass is claimed here.
 
 ## What is not proven
 
@@ -55,8 +55,8 @@ An OpenClaw issue documented that MCP host cancellation could fail to reach an i
 - [OpenTelemetry GenAI conventions](https://opentelemetry.io/docs/specs/semconv/registry/attributes/gen-ai/) already cover agent/tool-call trace attributes. Reuse trace context and redact sensitive payloads instead of creating a parallel observability schema.
 - [TuyaOpen](https://github.com/tuya/tuyaopen) and its [ESP32 platform component](https://github.com/tuya/TuyaOpen-esp32) are the device stack to adapt, subject to board/release testing. Current public TuyaOpen issue traffic demonstrates ordinary device/SDK integration friction, but no reviewed issue yet proves demand for this conformance profile.
 
-The hypothesis is that request/task status and physical effect disposition can diverge. Existing work already covers much of physical-action safety, so a possible contribution is clearer interoperability evidence across MCP cancellation/task semantics and device-effect outcomes. The seven current vectors do not test this hypothesis. External demand remains unproven. Keep this as a local engineering test profile unless an independent adapter or maintainer validates its value.
+The hypothesis is that request/task status and physical effect disposition can diverge. Existing work already covers much of physical-action safety, so a possible contribution is clearer interoperability evidence across MCP cancellation/task semantics and device-effect outcomes. The ten current vectors do not test this hypothesis. External demand remains unproven. Keep this as a local engineering test profile unless an independent adapter or maintainer validates its value.
 
 ## Next action
 
-The exact SINT physical-AI fixture and schema have now been compared with this repository's seven command vectors. A semantic gap remains around post-dispatch cancellation and physical-effect reconciliation, but there is no proof yet that an independent adapter needs this repository. The next closure is a small transport-neutral effect-disposition fixture set that reuses MCP task states, followed by an independent adapter run. If that run cannot be obtained, stop expanding the profile and offer the cases upstream. Pin a TuyaOpen/ESP32 integration only after the contract survives independent use.
+The exact SINT physical-AI fixture and schema have now been compared with this repository's ten command vectors. A semantic gap remains around post-dispatch cancellation and physical-effect reconciliation, but there is no proof yet that an independent adapter needs this repository. The next closure is a small transport-neutral effect-disposition fixture set that reuses MCP task states, followed by an independent adapter run. If that run cannot be obtained, stop expanding the profile and offer the cases upstream. Pin a TuyaOpen/ESP32 integration only after the contract survives independent use.

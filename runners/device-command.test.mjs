@@ -98,9 +98,9 @@ test("concurrent duplicate deliveries cause one modeled physical effect", async 
 
 test("public conformance vectors pass against the reference simulator", async () => {
   const report = await runConformance(createDevice);
-  assert.equal(report.profile, "agent-device-effect/0.2");
+  assert.equal(report.profile, "agent-device-effect/0.3");
   assert.equal(report.passed, true);
-  assert.equal(report.results.length, 9);
+  assert.equal(report.results.length, 10);
   assert.ok(report.results.every((result) => typeof result.id === "string"
     && typeof result.passed === "boolean"
     && Array.isArray(result.states)
@@ -120,4 +120,45 @@ test("public conformance harness detects an adapter that reports false success",
 test("rejects malformed identifiers before using them as deduplication keys", async () => {
   const command = { ...await load("valid"), idempotency_key: { toString: "bad" } };
   assert.deepEqual(validateCommand(command, principal, 1020), { state: "denied", code: "INVALID_ENVELOPE" });
+});
+
+test("malformed principal context is rejected without throwing or causing an effect", async () => {
+  const command = await load("valid");
+  const device = new SimulatedDevice();
+  for (const caller of [
+    { ...principal, authenticated: "true" },
+    { ...principal, authenticated: 1 },
+    { ...principal, tenantId: 42 },
+    { ...principal, deviceId: {} },
+    { ...principal, capabilities: ["lamp.set_power"] },
+    { ...principal, capabilities: null },
+  ]) {
+    assert.deepEqual(await device.execute(command, caller, 1020), {
+      state: "denied", code: "UNAUTHENTICATED",
+    });
+  }
+  assert.deepEqual(await device.inspectState(), { lampOn: false });
+  assert.equal(device.records.size, 0);
+});
+
+test("valid typed principal remains authorized", async () => {
+  assert.equal((await new SimulatedDevice().execute(await load("valid"), principal, 1020)).state, "succeeded");
+});
+
+test("public conformance suite rejects string-valued authentication context", async () => {
+  const report = await runConformance(createDevice);
+  const example = report.results.find((item) => item.id === "malformed-authentication-context");
+  assert.ok(example);
+  assert.equal(example.passed, true);
+  assert.deepEqual(example.states, ["denied"]);
+  assert.deepEqual(example.observedState, { lampOn: false });
+});
+
+test("faulting third-party adapter yields machine-readable failures without leaking exception details", async () => {
+  const report = await runConformance(() => { throw new Error("SECRET_SHOULD_NOT_LEAK"); });
+  assert.equal(report.passed, false);
+  assert.equal(report.results.length, 10);
+  assert.ok(report.results.every((entry) => entry.passed === false
+    && entry.codes.length === 1 && entry.codes[0] === "ADAPTER_ERROR"));
+  assert.equal(JSON.stringify(report).includes("SECRET_SHOULD_NOT_LEAK"), false);
 });
