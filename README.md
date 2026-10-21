@@ -11,6 +11,7 @@
 | AgentScope runtime / managed control plane | **Not integrated** | Source presence is not a runnable enterprise agent platform |
 | Tuya API, TuyaOpen, ESP32 | **Not integrated** | No paired device, real actuation or independent physical readback |
 | Production sandbox / identity / durable execution | **Not implemented here** | Simulator principal is injected; a saved snapshot is not crash-safe execution |
+| Crash-window reasoning classifier | **Test-only** | Six synthetic windows + one missing-intent test; no process termination or durable physical receipt |
 | Independent adoption | **Not verified** | No confirmed third-party adapter or usage |
 
 ## Fast local verification (no cloud account and no GitHub Actions)

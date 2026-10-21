@@ -30,7 +30,7 @@ bash tools/verify_release.sh
 
 Passing historical results from an earlier branch **must not** be represented as results for this commit. CI was not invoked to avoid needless GitHub Actions costs. The same rule applies to import testing; tree identity does not equal a running AgentScope service.
 
-The public test count is **10 vectors**; the suite sources contain **21 declared Node tests** across two files after this change. Count is not a pass claim.
+The public test count is **10 vectors**; the suite sources contain **28 declared Node tests** across three files after this change. Count is not a pass claim.
 
 ## Remaining blockers, ordered by leverage
 
