@@ -4,8 +4,8 @@ AgentPanel is a managed-agent and IoT system project centered on the customer ar
 
 ## Current progress (read before use)
 
-- Device-command checks in `contracts/`, `runners/`, and `fixtures/`: local reference simulator and seven vectors; no real adapter or physical device.
-- AgentScope `v2.0.10` full source: **imported on this review branch** as ordinary files at `vendor/agentscope/`; exact upstream tree SHA verified. This change is not yet merged to `main`.
+- Device-command checks in `contracts/`, `runners/`, and `fixtures/`: local reference simulator and nine vectors; no real adapter or physical device.
+- AgentScope `v2.0.10` full source: **imported as ordinary files** as ordinary files at `vendor/agentscope/`; exact upstream tree SHA verified. The authoritative development baseline is `main` after consolidation.
 - One-time exact release import script: `tools/vendor/import_agentscope_v2.sh`.
 - Tuya/AgentScope integration adapters, physical confirmation, durable idempotency: **NOT IMPLEMENTED**.
 

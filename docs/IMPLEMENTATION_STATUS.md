@@ -18,7 +18,7 @@ The contract and harness are development/test-time assets. No component in this 
 | Path | Responsibility | Status |
 | --- | --- | --- |
 | `contracts/` | Device-command, adapter, execution-trace and report contracts | Command profile is executable against the reference simulator; lifecycle trace remains design-only. |
-| `fixtures/` | Deterministic valid, denied, expired and replay cases | Seven device-command vectors run locally. |
+| `fixtures/` | Deterministic valid, denied, expired and replay cases | Nine device-command vectors run locally. |
 | `runners/` | Reference simulator and adapter conformance CLI | JavaScript implementation; no generic agent lifecycle runner yet. |
 | `adapters/` | Framework/device integration boundary | Documentation only; no AgentScope or Tuya adapter. |
 | `vendor/agentscope/` | Exact upstream v2.0.10 source snapshot | Complete source and license retained; not wired into this project. |

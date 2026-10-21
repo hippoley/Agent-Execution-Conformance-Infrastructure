@@ -49,7 +49,13 @@ export function validateCommand(command, principal, now) {
   if (now < command.issued_at) return { state: "denied", code: "COMMAND_NOT_YET_VALID" };
   if (now >= command.expires_at) return { state: "expired", code: "COMMAND_EXPIRED" };
   if (!principal.capabilities?.has(command.capability)) return { state: "denied", code: "CAPABILITY_NOT_ALLOWED" };
-  if (command.capability === "lamp.set_power" && typeof command.arguments?.on !== "boolean") {
+  // Permission to invoke a name is not proof that this adapter implements it.
+  // Fail closed rather than reporting a successful no-op for unknown capabilities.
+  if (command.capability !== "lamp.set_power") {
+    return { state: "denied", code: "UNSUPPORTED_CAPABILITY" };
+  }
+  if (!Object.hasOwn(command.arguments, "on") || Object.keys(command.arguments).length !== 1
+      || typeof command.arguments.on !== "boolean") {
     return { state: "denied", code: "INVALID_ARGUMENTS" };
   }
   return null;
