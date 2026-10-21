@@ -49,7 +49,12 @@ export function validateCommand(command, principal, now) {
   if (now < command.issued_at) return { state: "denied", code: "COMMAND_NOT_YET_VALID" };
   if (now >= command.expires_at) return { state: "expired", code: "COMMAND_EXPIRED" };
   if (!principal.capabilities?.has(command.capability)) return { state: "denied", code: "CAPABILITY_NOT_ALLOWED" };
-  if (command.capability === "lamp.set_power" && typeof command.arguments?.on !== "boolean") {
+  // Being allowlisted does not mean this adapter implements the operation.
+  // A missing handler must never borrow the lamp postcondition and report success.
+  if (command.capability !== "lamp.set_power") {
+    return { state: "denied", code: "UNSUPPORTED_CAPABILITY" };
+  }
+  if (Object.keys(command.arguments).length !== 1 || typeof command.arguments.on !== "boolean") {
     return { state: "denied", code: "INVALID_ARGUMENTS" };
   }
   return null;
