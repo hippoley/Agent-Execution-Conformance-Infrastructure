@@ -18,7 +18,7 @@ The contract and harness are development/test-time assets. No component in this 
 | Path | Responsibility | Status |
 | --- | --- | --- |
 | `contracts/` | Device-command, adapter, execution-trace and report contracts | Command profile is executable against the reference simulator; lifecycle trace remains design-only. |
-| `fixtures/` | Deterministic valid, denied, expired and replay cases | Seven device-command vectors run locally. |
+| `fixtures/` | Deterministic valid, denied, expired and replay cases | Nine v0.2 device-command vectors exercise the simulator and fail-closed unknown capability/argument semantics. |
 | `runners/` | Reference simulator and adapter conformance CLI | JavaScript implementation; no generic agent lifecycle runner yet. |
 | `adapters/` | Framework/device integration boundary | Documentation only; no AgentScope or Tuya adapter. |
 | `vendor/agentscope/` | Exact upstream v2.0.10 source snapshot | Complete source and license retained; not wired into this project. |
@@ -28,4 +28,4 @@ The contract and harness are development/test-time assets. No component in this 
 
 ## Known limits
 
-The simulator checks expiry, injected principal/device binding, capability allowlisting, idempotency and readback against a fake device. It does not provide real authentication, transport delivery, crash-safe persistence, cancellation reconciliation, or physical-state evidence. No third party is recorded as consuming the profile. See [the position review](POSITION_REVIEW.md) for the next falsifiable gate.
+The simulator checks expiry, injected principal/device binding, capability allowlisting, implemented-capability validation, exact argument shape, idempotency and readback against a fake device. It does not provide real authentication, transport delivery, crash-safe persistence, cancellation reconciliation, or physical-state evidence. No third party is recorded as consuming the profile. See [the position review](POSITION_REVIEW.md) for the next falsifiable gate.
