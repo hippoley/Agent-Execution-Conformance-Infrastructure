@@ -17,6 +17,7 @@
 | Process-separated C4 crash probe | **Local synthetic test: 9/9 PASS** | Separate durable test ledgers, process kill and recovery; not production exactly-once or physical proof |
 | Tuya Cloud official SDK adapter | **Offline 13/13 tests PASS** | Real SDK is a pinned optional dependency, but cloud login/device readback are NOT verified |
 | TuyaOpen v1.9.0 ESP32 source | **Pinned bootstrap, not downloaded here** | Official switch_demo and ESP32 platform will be fetched into ignored .deps; no compiled/flashed firmware |
+| Multi-device virtual fleet lab | **4/4 local tests passed** | 3 separate child processes; deterministic role pipeline; NO VMs or actual multi-Agent runtime |
 | Independent adoption | **Not verified** | No confirmed third-party adapter or usage |
 
 ## Fast local verification (no cloud account and no GitHub Actions)
@@ -39,6 +40,7 @@ The first command includes both the core device tests **and** capability-boundar
 - [Implementation truth](docs/IMPLEMENTATION_STATUS.md) — delivered versus blocked, updated per release.
 - [User stories and acceptance](docs/USER_STORIES.md) — M1–M14 platform, D1–D7 device, C1–C4 development conformance; unfinished items remain open.
 - [Primary vertical slice](docs/USER_STORY.md) — first independently testable business/device outcome.
+- [Virtual device fleet and role pipeline](docs/integrations/2026-10-22-virtual-fleet-and-agent-roles.md) — process-local development lab, not VM/multi-Agent production sandbox.
 - [Tuya Cloud and ESP32 integration guide](docs/integrations/2026-10-22-tuya-cloud-esp32.md) — read-only cloud probe and version-pinned TuyaOpen firmware bootstrap.
 - [Third-party provenance](docs/THIRD_PARTY.md) and [exact-source evidence](docs/AGENTSCOPE_V2_0_10_IMPORT_REPORT.md).
 

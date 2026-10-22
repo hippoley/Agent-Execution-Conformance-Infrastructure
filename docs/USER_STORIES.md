@@ -26,6 +26,8 @@ A 2026-10-22 development closure added a **process-separated loopback fake Tuya 
 
 The harness is an internal validation tool. It checks simulator behavior against the command and outcome contract; it does not sit as a product or production service on device requests, and it does not yet validate real framework/device adapters.
 
+A new [multi-device virtual fleet laboratory](integrations/2026-10-22-virtual-fleet-and-agent-roles.md) spawns separate loopback *test* device processes and exercises a deterministic policy/dispatch/observer role pipeline (4/4 local tests). This is **partial development evidence** for M13/D2/D3, **not** deployed multi-Agent coordination, isolated VMs, tenant IAM or real physical state verification. M13 remains OPEN.
+
 ## Repository-owned conformance stories
 
 | ID | Story | Acceptance evidence | Failure boundary | State |

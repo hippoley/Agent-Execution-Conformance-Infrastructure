@@ -69,7 +69,9 @@ export function createFakeTuyaService({ token = 'local-test-token', tenant = 'te
 }
 
 if (process.argv[1] && import.meta.url === new URL(`file://${process.argv[1]}`).href) {
-  const server = createFakeTuyaService({ token: process.env.AGENTPANEL_TEST_TOKEN || 'local-test-token' });
+  const server = createFakeTuyaService({ token: process.env.AGENTPANEL_TEST_TOKEN || 'local-test-token',
+    tenant: process.env.AGENTPANEL_TEST_TENANT || 'tenant-demo',
+    device: process.env.AGENTPANEL_TEST_DEVICE || 'esp32-demo' });
   server.listen(0, '127.0.0.1', () => {
     process.stdout.write(JSON.stringify({ port: server.address().port, testOnly: true }) + '\n');
   });
