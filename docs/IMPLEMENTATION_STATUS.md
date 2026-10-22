@@ -46,3 +46,12 @@ Do not run GitHub Actions unless a code change strictly requires a remote-only v
 ## Next acceptance gate
 
 Build an isolated local fake Tuya service and a thin AgentScope adapter without altering `vendor/agentscope/`. Demonstrate a real tool invocation and verify its result from an independently owned state store. Then permit *only low-risk test hardware* behind authenticated, scoped tool access. A green unit suite or an ACK alone never closes the hardware story.
+
+## Hardware Agent Studio M0 (2026-10-22)
+
+A minimal **loopback-only management console** was added in commit `d0768c5`:
+`admin/server.mjs`, `admin/index.html`, `admin/admin.js`, and `tests/admin.test.mjs`. Operators can create virtual-lamp records, create **configuration-only** Agent records, bind same-tenant devices, issue test-only fake lamp commands, and inspect persisted run records. Data lives in ignored `.local/agentpanel.json` and simulated lamp state is **ephemeral**.
+
+**Evidence:** a structurally matching locally authored backend with temporary stand-in Fake Tuya module implementations passed 5 local integration checks; the *exact* GitHub checkout with its real pre-existing simulator/client has **not yet passed a full clean-checkout test in this session**. No public deployment, authentication, true AgentScope ToolCall, multi-Agent orchestration, real sandbox/VM, official Tuya virtual-device provisioning, or ESP32 hardware functionality is claimed.
+
+The code is strictly a developer prototype, **not safe for public-network exposure**. Run `node admin/server.mjs` only on the local machine and validate `node --test tests/admin.test.mjs` in a complete checkout. Detailed M0 gates: [console audit](product/2026-10-22-agentpanel-admin-m0.md). M1, M2, M3 and M13 remain open for production acceptance.
