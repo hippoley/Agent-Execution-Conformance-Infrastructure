@@ -5,7 +5,7 @@ has not been verified without the upstream AgentScope Python dependencies.
 """
 import asyncio
 import json
-import os
+import hashlib
 import time
 import uuid
 from urllib.error import HTTPError, URLError
@@ -59,6 +59,7 @@ class FakeTuyaLampTool(ToolBase):
             "arguments": {"on": on}, "issued_at": now, "expires_at": now + 60,
             "idempotency_key": f"agentscope-test:{command_id}",
         }
+        digest = hashlib.sha256(json.dumps(command, separators=(",", ":")).encode("utf-8")).hexdigest()
         try:
             status, response = self._request("/v1/commands", command)
             if status != 200:
@@ -69,7 +70,9 @@ class FakeTuyaLampTool(ToolBase):
         try:
             rs, receipt = self._request(f"/v1/receipts/{command_id}")
             ss, state = self._request("/v1/state")
-            if (rs == ss == 200 and receipt.get("command_id") == command_id
+            if (rs == ss == 200 and receipt.get("digest") == digest
+                    and receipt.get("idempotency_key") == command["idempotency_key"]
+                    and receipt.get("command_id") == command_id
                     and receipt.get("tenant_id") == self.tenant and receipt.get("device_id") == self.device
                     and receipt.get("capability") == "lamp.set_power"
                     and receipt.get("observed", {}).get("lampOn") is on
