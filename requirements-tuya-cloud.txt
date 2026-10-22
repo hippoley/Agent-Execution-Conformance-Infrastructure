@@ -1,0 +1,2 @@
+# Official MIT Tuya Cloud SDK; keep upstream auth/HMAC signing, don't fork it.
+tuya-connector-python==0.1.2

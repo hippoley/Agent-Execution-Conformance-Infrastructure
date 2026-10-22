@@ -3,3 +3,11 @@ __pycache__/
 .pytest_cache/
 .venv/
 venv/
+
+# TuyaOpen local SDK/toolchain and credentials (never commit)
+.deps/
+**/tuya_config_secrets.h
+**/.env
+**/.env.*
+*.bin
+*.elf

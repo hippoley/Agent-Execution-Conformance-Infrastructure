@@ -14,6 +14,8 @@
 | `runners/c4-durable-probe*.mjs` | C4 synthetic OS-process crash laboratory | 9/9 exact-source local tests: separate gateway/device files, crash and lost ACK recovery, independent process restart; NO real power-failure or physical proof |
 | `runners/fake-tuya-service.mjs` + `adapters/fake-tuya-client.mjs` | Loopback-only test service and HTTP client | Separate child-process state/receipt readback, 4/4 local tests; no Tuya Cloud, secure identity or real hardware |
 | `adapters/agentscope_fake_tuya_tool.py` | AgentScope v2 ToolBase candidate | Python syntax-checked only; full AgentScope Toolkit execution blocked by missing runtime dependencies |
+| `adapters/tuya_cloud_adapter.py` | Real Tuya Cloud API **integration adapter**, optional official SDK | 13/13 offline tests with fake SDK object; no actual Tuya account/connection/firmware verification |
+| `tools/bootstrap_tuyaopen.sh` / `firmware/tuyaopen` | v1.9.0 immutable upstream SDK+ESP32 entrypoint | Exact official release SHA pinned; GitHub clone, build, flash and physical pairing NOT run |
 | `runners/*.test.mjs` | Local test sources | Core, capability-boundary, and synthetic recovery regressions; run all files, not one subset |
 | `docs/` | Canonical product/system/stories/provenance | Documents planned capability separately from deployed code |
 
@@ -23,7 +25,7 @@ The vendor subtree's exact tree identity was independently checked via the GitHu
 
 - **AgentScope execution integration:** ToolBase bridge source exists, but no real AgentScope Toolkit/agent-loop invocation has been verified.
 - **Managed-agent services M1–M14:** product requirements; no complete deployed control plane.
-- **Tuya IoT / TuyaOpen / ESP32 D1–D7:** new *fake* HTTP device service passes local tests, but no real credentials, paired board, independent physical readback, offline handling or firmware proof.
+- **Tuya IoT / TuyaOpen / ESP32 D1–D7:** new *fake* HTTP device service passes local tests, but a production Tuya adapter implementation and upstream firmware bootstrap **exist**, but there are still no verified real credentials, paired board, independent physical readback, offline handling or firmware proof.
 - **Conformance C3/C4:** C3 remains unimplemented. C4 now has a synthetic classifier **and process-separated local filesystem crash-window tests**. No real device, authenticated external authority, power-failure durability or production-ready recovery is proven.
 - **Sandbox isolation:** no live process/filesystem/network isolation acceptance.
 - **Security:** injected `principal.authenticated` is not proof of IAM, cryptographic identity or policy enforcement.

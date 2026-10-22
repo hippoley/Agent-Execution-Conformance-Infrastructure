@@ -1,0 +1,6 @@
+repository=https://github.com/tuya/TuyaOpen.git
+tag=v1.9.0
+commit=b80932db6d9e0be1c5692aafb00b3109f3caf134
+example=apps/tuya_cloud/switch_demo
+platform_component=https://github.com/tuya/TuyaOpen-esp32
+source_license=Apache-2.0-at-upstream-root (verify component-specific notices)
