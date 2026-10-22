@@ -20,6 +20,8 @@ This supporting story describes development checks, not another product. The bro
 | D1-D7 | Tuya device plane and ESP32 execution edge | Product requirements; no real device adapter or board validation. |
 | C1-C4 | Development/test-time checks for the device-command boundary | Current project slice: C1/C2 have simulator-only development evidence; C3/C4 remain unimplemented. |
 
+A 2026-10-22 development closure added a **process-separated loopback fake Tuya service** and a Node client (4/4 local integration tests). The AgentScope ToolBase bridge has only been syntax-checked. This is partial progress toward D2/D3 and the primary story, **not** a real AgentScope/physical-device acceptance or C4 recovery. See [the evidence report](audits/2026-10-22-fake-tuya-closure.md).
+
 The harness is an internal validation tool. It checks simulator behavior against the command and outcome contract; it does not sit as a product or production service on device requests, and it does not yet validate real framework/device adapters.
 
 ## Repository-owned conformance stories

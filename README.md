@@ -12,6 +12,8 @@
 | Tuya API, TuyaOpen, ESP32 | **Not integrated** | No paired device, real actuation or independent physical readback |
 | Production sandbox / identity / durable execution | **Not implemented here** | Simulator principal is injected; a saved snapshot is not crash-safe execution |
 | Crash-window reasoning classifier | **Test-only** | Six synthetic windows + one missing-intent test; no process termination or durable physical receipt |
+| Process-separated fake Tuya boundary | **Local test passed** | Four Node HTTP integration tests; synthetic service state only, not hardware proof |
+| AgentScope v2 ToolBase bridge | **Source candidate** | Python syntax compiled; upstream Toolkit invocation not yet tested |
 | Independent adoption | **Not verified** | No confirmed third-party adapter or usage |
 
 ## Fast local verification (no cloud account and no GitHub Actions)
@@ -20,6 +22,7 @@ Requires Node.js 22+ for the development harness and Git for the pinned source c
 
 ```bash
 node --test runners/*.test.mjs
+python -m py_compile adapters/agentscope_fake_tuya_tool.py
 node runners/conformance.mjs runners/device-command.mjs
 bash tools/verify_release.sh
 ```
