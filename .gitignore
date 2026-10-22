@@ -11,3 +11,6 @@ venv/
 **/.env.*
 *.bin
 *.elf
+
+# Local AgentPanel development data (contains fake device tokens)
+.local/

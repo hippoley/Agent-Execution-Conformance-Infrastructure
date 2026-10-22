@@ -57,3 +57,7 @@ The first command includes both the core device tests **and** capability-boundar
 First prove **one AgentScope → constrained capability → test device / fake Tuya API → externally observed outcome** path, using deny-by-default permissions and separate simulated versus live modes. Prioritize one safe low-risk device. Only after this gate, prove cancellation/crash reconciliation, real identity, and sandbox isolation. Do not start with another general agent admin UI, new workflow engine, large vendor fork, or unrestricted physical control.
 
 **Safety:** no production credentials in prompts/traces/fixtures; do not connect this reference simulator directly to privileged real actuators. Cloud API acknowledgement is not physical completion. No affiliation with or endorsement by AgentScope or Tuya is claimed.
+
+## Hardware Agent Studio M0 (development console)
+
+Start the first local-only management UI using `node admin/server.mjs` and open `http://127.0.0.1:4177`. It supports virtual device configuration, Agent configuration/binding, simulated lamp execution and run history. **No real AgentScope agent, VM sandbox, IAM, live Tuya or ESP32. Do not expose the local server publicly.** See [M0 acceptance and limitations](docs/product/2026-10-22-agentpanel-admin-m0.md). Validate `node --test tests/admin.test.mjs` on a full checkout.
