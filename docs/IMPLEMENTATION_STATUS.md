@@ -11,6 +11,7 @@
 | `runners/device-command.mjs` | Local reference state-setting simulator | In-memory effect / dedup, opt-in JSON snapshot; does not actuate hardware |
 | `runners/conformance.mjs` | Public adapter test runner | Profile `agent-device-effect/0.3`: 10 deterministic JSON vectors |
 | `runners/crash-window-probe.mjs` | Synthetic C4 classification | Seven test-only cases; **not** a durable recovery engine or independent effect oracle |
+| `runners/c4-durable-probe*.mjs` | C4 synthetic OS-process crash laboratory | 9/9 exact-source local tests: separate gateway/device files, crash and lost ACK recovery, independent process restart; NO real power-failure or physical proof |
 | `runners/fake-tuya-service.mjs` + `adapters/fake-tuya-client.mjs` | Loopback-only test service and HTTP client | Separate child-process state/receipt readback, 4/4 local tests; no Tuya Cloud, secure identity or real hardware |
 | `adapters/agentscope_fake_tuya_tool.py` | AgentScope v2 ToolBase candidate | Python syntax-checked only; full AgentScope Toolkit execution blocked by missing runtime dependencies |
 | `runners/*.test.mjs` | Local test sources | Core, capability-boundary, and synthetic recovery regressions; run all files, not one subset |
@@ -23,7 +24,7 @@ The vendor subtree's exact tree identity was independently checked via the GitHu
 - **AgentScope execution integration:** ToolBase bridge source exists, but no real AgentScope Toolkit/agent-loop invocation has been verified.
 - **Managed-agent services M1–M14:** product requirements; no complete deployed control plane.
 - **Tuya IoT / TuyaOpen / ESP32 D1–D7:** new *fake* HTTP device service passes local tests, but no real credentials, paired board, independent physical readback, offline handling or firmware proof.
-- **Conformance C3/C4:** C3 remains unimplemented; C4 has a synthetic reasoning classifier only. There is no multiprocess crash-window execution, durable recovery, or real external outcome oracle.
+- **Conformance C3/C4:** C3 remains unimplemented. C4 now has a synthetic classifier **and process-separated local filesystem crash-window tests**. No real device, authenticated external authority, power-failure durability or production-ready recovery is proven.
 - **Sandbox isolation:** no live process/filesystem/network isolation acceptance.
 - **Security:** injected `principal.authenticated` is not proof of IAM, cryptographic identity or policy enforcement.
 - **External adoption:** no independently maintained adapter or downstream dependency confirmed.
@@ -32,6 +33,7 @@ The vendor subtree's exact tree identity was independently checked via the GitHu
 
 ```bash
 node --test runners/*.test.mjs
+# Includes C4 crash/restart regression suite
 node runners/conformance.mjs runners/device-command.mjs
 bash tools/verify_release.sh
 ```

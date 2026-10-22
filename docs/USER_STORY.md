@@ -19,7 +19,7 @@ A local simulator and **10 public `agent-device-effect/0.3` vectors** test bound
 | A | Reference simulator, false-success-negative harness and typed principal checks | Code available; refreshed full test execution pending |
 | B | AgentScope invokes a separate fake device adapter with independent state | **PARTIAL:** separate fake HTTP service + client tested, but no real AgentScope runtime invocation |
 | C | One approved test Tuya device returns externally corroborated outcome | **OPEN** |
-| D | Cancellation, ACK loss, crash windows and non-idempotent behavior | **OPEN** |
+| D | Cancellation, ACK loss, crash windows and non-idempotent behavior | **PARTIAL:** 9/9 synthetic crash/restart tests on a non-idempotent counter; cancellation and real external device proof OPEN |
 | E | Independent developer reproduces an adapter without importing our simulator | **OPEN** |
 
 ## Source and ownership story
