@@ -14,8 +14,10 @@ async function load(path){try{return JSON.parse(await readFile(path,'utf8'))}cat
 async function persist(path,value){await mkdir(dirname(path),{recursive:true});const tmp=path+'.'+randomUUID()+'.tmp';const f=await open(tmp,'wx',0o600);try{await f.writeFile(JSON.stringify(value,null,2));await f.sync()}finally{await f.close()}await rename(tmp,path)}
 export async function createAdmin({dataFile=join(process.cwd(),'.local','agentpanel.json')}={}){
  let db=await load(dataFile)??{agents:[],devices:[],runs:[],workflows:[]};
- db.workflows??=[];const workers=new Map();let saving=Promise.resolve();
- const save=()=>{saving=saving.then(()=>persist(dataFile,db));return saving};
+ db.workflows??=[];
+ for(const run of db.runs){if(run.status==='RUNNING'){run.status='INTERRUPTED_UNKNOWN';run.recovery='REQUIRES_MANUAL_RECONCILIATION';}}
+ const workers=new Map(),activeRuns=new Set();let saving=Promise.resolve();
+ const save=()=>{const snapshot=structuredClone(db);saving=saving.then(()=>persist(dataFile,snapshot));return saving};
  async function fake(d){if(workers.has(d.id))return workers.get(d.id);const service=createFakeTuyaService({token:d.token,tenant:d.tenant,device:d.id});await new Promise(resolve=>service.listen(0,'127.0.0.1',resolve));const client=new FakeTuyaClient({baseUrl:`http://127.0.0.1:${service.address().port}`,token:d.token,tenant:d.tenant,device:d.id});workers.set(d.id,{service,client});return workers.get(d.id)}
  const device=d=>({id:d.id,name:d.name,tenant:d.tenant,type:'virtual_lamp',runtime:'EPHEMERAL_FAKE',connected:workers.has(d.id)});
  const agent=a=>({...a,runtime:'CONFIG_ONLY_NO_AGENTSCOPE'});
@@ -57,10 +59,14 @@ export async function createAdmin({dataFile=join(process.cwd(),'.local','agentpa
     if(Object.keys(input).length!==0)return respond(res,400,{error:'NO_RUN_ARGUMENTS_ALLOWED'});
     const workflow=db.workflows.find(x=>x.id===match[1]),a=db.agents.find(x=>x.id===workflow?.agentId);
     if(!workflow||!a)return respond(res,404,{error:'WORKFLOW_NOT_FOUND'});
+    if(activeRuns.has(workflow.id))return respond(res,409,{error:'WORKFLOW_ALREADY_RUNNING'});
+    activeRuns.add(workflow.id);
     const allowed=db.devices.filter(d=>a.devices.includes(d.id));
-    const result=await executeWorkflow({definition:workflow.definition,tenant:a.tenant,workflowId:workflow.id,authorizedDevices:allowed,
+    let result;
+    try{result=await executeWorkflow({definition:workflow.definition,tenant:a.tenant,workflowId:workflow.id,authorizedDevices:allowed,
        acquire:async id=>(await fake(db.devices.find(d=>d.id===id))).client,
        saveRun:async run=>{const index=db.runs.findIndex(r=>r.id===run.id);const copy=structuredClone(run);if(index<0)db.runs.unshift(copy);else db.runs[index]=copy;db.runs=db.runs.slice(0,250);await save()}});
+    }finally{activeRuns.delete(workflow.id)}
     return respond(res,result.status==='DENIED'?403:200,result);
    }
    const id=u.pathname.split('/')[3],a=db.agents.find(x=>x.id===id),d=db.devices.find(x=>x.id===input.deviceId);

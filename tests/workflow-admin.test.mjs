@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {mkdtemp,rm} from 'node:fs/promises';
+import {mkdtemp,rm,writeFile} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {createAdmin} from '../admin/server.mjs';
@@ -34,4 +34,21 @@ test('real HTTP admin persists and executes a 2-device fake workflow',async()=>{
   const deny=await api('/api/workflows',{...definition,name:'invalid',nodes:[{id:'n1',type:'lamp.set_power',deviceId:'unauthorized',on:true}]});
   assert.equal(deny.code,403);
  }finally {await app.close();await rm(dir,{recursive:true,force:true})}
+});
+
+test('restart labels unfinished dispatch as unknown; never silently replays',async()=>{
+ const dir=await mkdtemp(join(tmpdir(),'agentpanel-recovery-'));
+ const dataFile=join(dir,'db.json');
+ await writeFile(dataFile,JSON.stringify({agents:[],devices:[],workflows:[],runs:[{
+   id:'test-run',status:'RUNNING',nodes:[{id:'step1',commandId:'original-command',status:'DISPATCH_INTENT_SAVED'}]
+ }]}));
+ const app=await createAdmin({dataFile});
+ await new Promise(ok=>app.server.listen(0,'127.0.0.1',ok));
+ try{
+  const response=await fetch('http://127.0.0.1:'+app.server.address().port+'/api/overview');
+  const data=await response.json();
+  assert.equal(data.runs[0].status,'INTERRUPTED_UNKNOWN');
+  assert.equal(data.runs[0].recovery,'REQUIRES_MANUAL_RECONCILIATION');
+  assert.equal(data.runs[0].nodes[0].commandId,'original-command');
+ }finally{await app.close();await rm(dir,{recursive:true,force:true})}
 });
