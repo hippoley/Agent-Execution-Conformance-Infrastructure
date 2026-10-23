@@ -1,0 +1,177 @@
+cmake_minimum_required(VERSION 3.20)
+project(agentic_kit_posix_examples C)
+
+set(CMAKE_C_STANDARD 99)
+set(CMAKE_C_STANDARD_REQUIRED ON)
+set(CMAKE_C_EXTENSIONS ON)
+
+# -- Import agentic-kit library (standalone mode) ----------------------------
+# When built as a subdirectory of the root project, targets already exist.
+# When built standalone (cmake -S examples/posix -B build), pull them in.
+if(NOT TARGET tuya_iot_client)
+    set(AGENTIC_KIT_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+    set(AGENTIC_KIT_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+    add_subdirectory("${CMAKE_CURRENT_SOURCE_DIR}/../.." "${CMAKE_BINARY_DIR}/_agentic_kit" EXCLUDE_FROM_ALL)
+endif()
+
+# -- Example-only third-party libraries (fetched at configure time) ----------
+include(FetchContent)
+
+FetchContent_Declare(
+    qrcodegen
+    GIT_REPOSITORY https://github.com/nayuki/QR-Code-generator.git
+    GIT_TAG        master
+    SOURCE_SUBDIR  _no_cmake
+)
+FetchContent_Declare(
+    quirc
+    GIT_REPOSITORY https://github.com/dlbeer/quirc.git
+    GIT_TAG        master
+    SOURCE_SUBDIR  _no_cmake
+)
+FetchContent_Declare(
+    stb
+    GIT_REPOSITORY https://github.com/nothings/stb.git
+    GIT_TAG        master
+    SOURCE_SUBDIR  _no_cmake
+)
+FetchContent_MakeAvailable(qrcodegen quirc stb)
+
+add_library(qrcodegen STATIC "${qrcodegen_SOURCE_DIR}/c/qrcodegen.c")
+target_include_directories(qrcodegen PUBLIC "${qrcodegen_SOURCE_DIR}/c")
+
+add_library(stb_image INTERFACE)
+target_include_directories(stb_image INTERFACE "${stb_SOURCE_DIR}")
+
+add_library(quirc STATIC
+    "${quirc_SOURCE_DIR}/lib/decode.c"
+    "${quirc_SOURCE_DIR}/lib/identify.c"
+    "${quirc_SOURCE_DIR}/lib/quirc.c"
+    "${quirc_SOURCE_DIR}/lib/version_db.c"
+)
+target_include_directories(quirc PUBLIC "${quirc_SOURCE_DIR}/lib")
+
+# -- ai / role-management --------------------------------------------------
+add_subdirectory(ai/role-management)
+
+# -- pair / api-activate -----------------------------------------------------
+add_executable(activate_demo
+    "${CMAKE_CURRENT_SOURCE_DIR}/pair/api-activate/activate_demo.c"
+    "${CMAKE_CURRENT_SOURCE_DIR}/pair/api-activate/activate_demo_main.c"
+)
+target_include_directories(activate_demo PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/pair/api-activate")
+target_link_libraries(activate_demo PRIVATE tuya_iot_client)
+
+add_custom_command(TARGET activate_demo POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${CMAKE_CURRENT_SOURCE_DIR}/pair/api-activate/tuya_openapi.py"
+        "$<TARGET_FILE_DIR:activate_demo>/tuya_openapi.py"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${CMAKE_CURRENT_SOURCE_DIR}/pair/api-activate/activate-demo.sh"
+        "$<TARGET_FILE_DIR:activate_demo>/activate-demo.sh"
+)
+
+# -- pair / scan-by-app ------------------------------------------------------
+add_executable(scan_by_app_pair_demo
+    "${CMAKE_CURRENT_SOURCE_DIR}/pair/scan-by-app/scan_by_app_pair_demo.c"
+    "${CMAKE_CURRENT_SOURCE_DIR}/pair/scan-by-app/scan_by_app_pair_demo_main.c"
+)
+target_include_directories(scan_by_app_pair_demo PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/pair/scan-by-app")
+target_link_libraries(scan_by_app_pair_demo PRIVATE tuya_iot_client qrcodegen)
+
+# -- pair / scan-by-device ---------------------------------------------------
+add_executable(scan_by_device_pair_demo
+    "${CMAKE_CURRENT_SOURCE_DIR}/pair/scan-by-device/scan_by_device_pair_demo.c"
+    "${CMAKE_CURRENT_SOURCE_DIR}/pair/scan-by-device/scan_by_device_pair_demo_main.c"
+)
+target_include_directories(scan_by_device_pair_demo PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/pair/scan-by-device")
+target_link_libraries(scan_by_device_pair_demo PRIVATE tuya_iot_client stb_image quirc)
+
+# -- pair / unbind-demo ------------------------------------------------------
+add_executable(unbind_demo
+    "${CMAKE_CURRENT_SOURCE_DIR}/pair/unbind-demo/unbind_demo.c"
+    "${CMAKE_CURRENT_SOURCE_DIR}/pair/unbind-demo/unbind_demo_main.c"
+)
+target_include_directories(unbind_demo PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/pair/unbind-demo")
+target_link_libraries(unbind_demo PRIVATE tuya_iot_client)
+
+# -- dp-management -----------------------------------------------------------
+add_executable(dp_management_demo
+    "${CMAKE_CURRENT_SOURCE_DIR}/dp-management/dp_management_demo.c"
+    "${CMAKE_CURRENT_SOURCE_DIR}/dp-management/dp_management_demo_main.c"
+)
+target_include_directories(dp_management_demo PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/dp-management")
+target_link_libraries(dp_management_demo PRIVATE tuya_iot_client)
+
+# -- ota-demo ----------------------------------------------------------------
+add_executable(ota_demo
+    "${CMAKE_CURRENT_SOURCE_DIR}/ota-demo/ota_demo.c"
+    "${CMAKE_CURRENT_SOURCE_DIR}/ota-demo/ota_demo_main.c"
+)
+target_include_directories(ota_demo PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/ota-demo")
+target_link_libraries(ota_demo PRIVATE tuya_iot_client)
+
+add_executable(ota_confirm_demo
+    "${CMAKE_CURRENT_SOURCE_DIR}/ota-demo/ota_demo.c"
+    "${CMAKE_CURRENT_SOURCE_DIR}/ota-confirm/ota_confirm_demo.c"
+    "${CMAKE_CURRENT_SOURCE_DIR}/ota-confirm/ota_confirm_demo_main.c"
+)
+target_include_directories(ota_confirm_demo PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/ota-confirm"
+    "${CMAKE_CURRENT_SOURCE_DIR}/ota-demo"
+)
+target_link_libraries(ota_confirm_demo PRIVATE tuya_iot_client)
+
+# -- ai / rtc-client (prebuilt lib, optional) --------------------------------
+if(TARGET tuya_steam_client)
+    add_executable(udp_chat_demo
+        "${CMAKE_CURRENT_SOURCE_DIR}/ai/rtc-client/udp_chat_demo.c"
+        "${CMAKE_CURRENT_SOURCE_DIR}/ai/rtc-client/udp_chat_demo_main.c"
+    )
+    target_include_directories(udp_chat_demo PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/ai/rtc-client")
+    target_link_libraries(udp_chat_demo PRIVATE tuya_iot_client tuya_steam_client)
+
+    add_executable(udp_edu_camera_demo
+        "${CMAKE_CURRENT_SOURCE_DIR}/ai/rtc-client/udp_edu_camera_demo.c"
+        "${CMAKE_CURRENT_SOURCE_DIR}/ai/rtc-client/udp_edu_camera_demo_main.c"
+    )
+    target_include_directories(udp_edu_camera_demo PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/ai/rtc-client")
+    target_link_libraries(udp_edu_camera_demo PRIVATE tuya_iot_client tuya_steam_client)
+else()
+    message(STATUS "rtc-client prebuilt lib not available; skipping udp_chat_demo and udp_edu_camera_demo")
+endif()
+
+# -- ai / rtc-tcp-client ----------------------------------------------------
+# Generated image Packets exceed the embedded default reassembly capacity.
+target_compile_definitions(tuya_ai_tcp PUBLIC AGENTIC_KIT_TAI_FRAG_BUF_SIZE=1048576)
+
+add_executable(text_chat_demo "${CMAKE_CURRENT_SOURCE_DIR}/ai/rtc-tcp-client/text_chat_demo.c")
+target_link_libraries(text_chat_demo PRIVATE tuya_ai_tcp tuya_iot_client agentic_kit_pal)
+
+add_executable(workflow_variables_demo "${CMAKE_CURRENT_SOURCE_DIR}/ai/rtc-tcp-client/workflow_variables_demo.c")
+target_link_libraries(workflow_variables_demo PRIVATE tuya_ai_tcp tuya_iot_client agentic_kit_pal)
+
+add_executable(edu_camera_demo "${CMAKE_CURRENT_SOURCE_DIR}/ai/rtc-tcp-client/edu_camera_demo.c")
+target_link_libraries(edu_camera_demo PRIVATE tuya_ai_tcp tuya_iot_client agentic_kit_pal)
+
+add_executable(music_play_demo "${CMAKE_CURRENT_SOURCE_DIR}/ai/rtc-tcp-client/music_play_demo.c")
+target_link_libraries(music_play_demo PRIVATE tuya_ai_tcp tuya_iot_client agentic_kit_pal)
+
+add_executable(mcp_demo "${CMAKE_CURRENT_SOURCE_DIR}/ai/rtc-tcp-client/mcp_demo.c")
+target_link_libraries(mcp_demo PRIVATE tuya_ai_tcp tuya_iot_client agentic_kit_pal)
+
+add_executable(agent_trigger_demo "${CMAKE_CURRENT_SOURCE_DIR}/ai/rtc-tcp-client/agent_trigger_demo.c")
+target_link_libraries(agent_trigger_demo PRIVATE tuya_ai_tcp tuya_iot_client agentic_kit_pal)
+
+add_executable(mqtt_interrupt_demo "${CMAKE_CURRENT_SOURCE_DIR}/ai/rtc-tcp-client/mqtt_interrupt_demo.c")
+target_link_libraries(mqtt_interrupt_demo PRIVATE tuya_ai_tcp tuya_iot_client agentic_kit_pal)
+
+find_library(OPUS_LIBRARY opus)
+find_path(OPUS_INCLUDE_DIR opus/opus.h)
+if(OPUS_LIBRARY AND OPUS_INCLUDE_DIR)
+    add_executable(audio_chat_demo "${CMAKE_CURRENT_SOURCE_DIR}/ai/rtc-tcp-client/audio_chat_demo.c")
+    target_include_directories(audio_chat_demo PRIVATE "${OPUS_INCLUDE_DIR}")
+    target_link_libraries(audio_chat_demo PRIVATE tuya_ai_tcp tuya_iot_client agentic_kit_pal "${OPUS_LIBRARY}")
+else()
+    message(STATUS "libopus not found; skipping audio_chat_demo")
+endif()
