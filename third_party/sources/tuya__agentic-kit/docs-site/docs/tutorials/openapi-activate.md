@@ -1,0 +1,169 @@
+---
+title: OpenAPI 配网
+sidebar_label: OpenAPI 配网
+sidebar_position: 6
+toc_labels:
+  1-用户同步--post-v10appsschemauser: 用户同步
+  2-生成配网-token--post-v10deviceparingtoken: 生成配网 Token
+  3-查询配网结果--get-v10deviceparingtokenstoken: 查询配网结果
+  4-设备重置恢复出厂设置--post-v20cloudthingdevice_idreset: 设备重置
+---
+
+# OpenAPI 配网
+
+> 对应示例：`examples/posix/pair/api-activate/`
+
+:::tip
+OpenAPI配网需要新建云项目并关联App，请先参考 [创建 App 和云项目](../guides/create-cloud-project.md) 完成云端配置。
+:::
+
+本章介绍第三种配网方式：**不依赖涂鸦 App**，通过涂鸦 OpenAPI（Cloud API）在
+服务端完成用户创建和配网 Token 生成，再将 Token 传给设备完成激活。
+
+前两种配网方式都需要用户安装并使用涂鸦 App 来完成扫码配网。但在某些场景下，
+设备厂商可能：
+
+- 拥有自己的 App 或后台系统，不希望依赖涂鸦 App
+- 设备没有屏幕也没有摄像头
+
+此时可以通过涂鸦 OpenAPI 直接在服务端完成用户同步和配网 Token 的生成，然后
+通过任意方式（串口、蓝牙、HTTP 等）将 Token 传递给设备，设备调用
+`iot_client_init_on_boarding_with_token()` 即可完成激活。
+
+## 整体流程 {#整体流程}
+
+```
+[服务端 / 脚本]                              [设备端]
+      |                                          |
+      |  1. POST /v1.0/apps/{schema}/user        |
+      |     (创建/同步用户, 获得 uid)             |
+      |                                          |
+      |  2. POST /v1.0/device/paring/token       |
+      |     (生成配网 token, region, secret)      |
+      |                                          |
+      |  3. 拼接: {region}{token}{secret}         |
+      |     传递给设备 ----------------------->   |
+      |                                          |
+      |                          4. iot_client_init_on_boarding_with_token()
+      |                             (用 token 激活设备)
+      |                                          |
+      |  5. GET /v1.0/device/paring/tokens/{token}|
+      |     (轮询确认配网结果)                    |
+```
+
+## 涉及的 OpenAPI {#涉及的-openapi}
+
+### 1. 用户同步 — `POST /v1.0/apps/{schema}/user` {#1-用户同步--post-v10appsschemauser}
+
+在涂鸦云中创建或同步一个用户，返回用户 `uid`。
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `country_code` | string | 是 | 国家码，如 `"86"` |
+| `username` | string | 是 | 用户名 |
+| `password` | string | 是 | 密码（MD5 哈希值） |
+| `username_type` | int | 是 | 1=手机号, 2=邮箱, 3=其他 |
+
+### 2. 生成配网 Token — `POST /v1.0/device/paring/token` {#2-生成配网-token--post-v10deviceparingtoken}
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `uid` | string | 是 | 用户 uid |
+| `paring_type` | string | 是 | 配网类型：`BLE`、`AP`、`EZ` |
+| `time_zone_id` | string | 是 | 时区 |
+
+### 3. 查询配网结果 — `GET /v1.0/device/paring/tokens/{token}` {#3-查询配网结果--get-v10deviceparingtokenstoken}
+
+查询设备是否已通过该 Token 完成激活。
+
+### 4. 设备重置（恢复出厂设置） — `POST /v2.0/cloud/thing/{device_id}/reset` {#4-设备重置恢复出厂设置--post-v20cloudthingdevice_idreset}
+
+根据设备 ID 将设备解绑并恢复出厂设置。重置后设备与原用户的绑定关系被清除，
+设备需要重新走配网激活流程才能再次使用。
+
+| 参数 | 类型 | 位置 | 必填 | 说明 |
+|------|------|------|------|------|
+| `device_id` | string | path | 是 | 设备 ID |
+
+返回示例：
+
+```json
+{
+    "tid": "b8a2b49abbbc11eda71e169efc83a172",
+    "result": true,
+    "t": 1678065474602,
+    "success": true
+}
+```
+
+设备端收到云端下发的重置通知后，应清除本地保存的激活信息（uuid、
+authkey 等），重新进入待配网状态。
+
+> 参考文档：[恢复出厂设置](https://developer.tuya.com/cn/docs/cloud/187da401c3?id=Kcp5pqcrmyo21)
+
+## Token 格式 {#token-格式}
+
+设备端接收的 Token 需要由三部分拼接而成：
+
+```
+{region}{token}{secret}
+```
+
+例如：`region="AY"`, `token="H73H8u7A"`, `secret="p4pX"` → 完整 Token 为 `AYH73H8u7Ap4pX`。
+
+设备端的 `iot_client_init_on_boarding_with_token()` 会自动从前两个字符解析 Region 信息。
+
+## 环境配置 {#环境配置}
+
+| 环境变量 | 说明 | 示例 |
+|----------|------|------|
+| `TUYA_CLIENT_ID` | 涂鸦 IoT 平台的 Access ID | `xwm........` |
+| `TUYA_CLIENT_SECRET` | 涂鸦 IoT 平台的 Access Secret | `95f13d4a616d407a...` |
+| `TUYA_BASE_URL` | OpenAPI 地址 | `https://openapi.tuyacn.com` |
+| `SCHEMA` | App schema 标识（shell 脚本使用；Python 脚本也支持 `TUYA_SCHEMA` 或 `--schema` 参数） | `marsid` |
+
+不同数据中心对应的 `TUYA_BASE_URL`：
+
+| 数据中心 | URL |
+|----------|-----|
+| 中国 | `https://openapi.tuyacn.com` |
+| 美西 | `https://openapi.tuyaus.com` |
+| 欧洲 | `https://openapi.tuyaeu.com` |
+| 印度 | `https://openapi.tuyain.com` |
+
+## 运行示例 {#运行示例}
+
+```sh
+export TUYA_CLIENT_ID="your_client_id"
+export TUYA_CLIENT_SECRET="your_secret"
+export TUYA_BASE_URL="https://openapi.tuyacn.com"
+export SCHEMA="your_schema"
+
+# 一键脚本
+./build/activate-demo.sh
+
+# 或分步执行
+python3 ./build/tuya_openapi.py sync-user --schema marsid --country-code 86 \
+    --username "test_user" --password "mypassword" --username-type 3
+
+python3 ./build/tuya_openapi.py pairing-token --uid "ay..." --paring-type BLE \
+    --time-zone-id "Asia/Shanghai"
+
+./build/activate_demo "$PAIRING_TOKEN" <uuid> <authkey> <product_key>
+
+# 激活后主动解绑，并查询、输出解绑前后的绑定状态
+./build/activate_demo "$PAIRING_TOKEN" <uuid> <authkey> <product_key> --release
+```
+
+`--release` 会在调用 `iot_client_reset()` 前后各查询一次云端绑定状态，输出
+`enable`（仍绑定）、`reset`（已解绑）或 `reset_factory`（恢复出厂请求）。
+查询失败时输出实际错误码；解绑后云端可能已不再接受旧设备凭证，此时也会如实输出查询失败。
+解绑后的查询使用提前保存的设备凭证调用 `iot_get_binding_status()`，原 client 已被 reset 释放，
+无需重新创建 client。
+
+## 注意事项 {#注意事项}
+
+- 配网 Token 有有效期，需在有效期内完成设备激活；可用 `tuya_openapi.py pairing-result --poll` 轮询确认结果（`--timeout` 默认 100 秒）。
+- `tuya_openapi.py` 使用 Python 标准库实现，无需安装额外依赖。
+- 实际产品中，OpenAPI 调用应在厂商自己的后台服务中完成，**不应将 Access
+  Secret 暴露在客户端或设备端**。

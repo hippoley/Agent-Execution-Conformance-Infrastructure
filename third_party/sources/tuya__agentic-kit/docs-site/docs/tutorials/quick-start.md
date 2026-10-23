@@ -1,0 +1,107 @@
+---
+title: 快速开始
+sidebar_label: 快速开始
+sidebar_position: 1
+---
+
+# 快速开始
+
+> 💡 **没有硬件？** 本页全部示例均可在 macOS 或 Linux 上运行，无需开发板。
+
+:::note 首次接入？
+如果你是第一次使用涂鸦平台，请先阅读[介绍](../intro.md)和[核心概念](../concepts.md)，
+了解产品 PID、设备授权码、配网等基础概念。
+:::
+
+:::tip 需要用自己的设备？
+先完成[配网](./pair-overall.md)获取凭据，或[领取免费授权码](../get-authkey.md)。
+:::
+
+## 依赖 {#依赖}
+
+| 工具/库 | 版本 | macOS 安装 | Linux (Debian/Ubuntu) 安装 |
+|---------|------|-----------|---------------------------|
+| CMake | ≥ 3.20 | `brew install cmake` | `apt install cmake` |
+| Python3 | ≥ 3.x | `brew install python3` | `apt install python3` |
+
+> 构建系统会自动编译 bundled 的 mbedTLS、cJSON、coreHTTP、coreMQTT 依赖，无需单独安装。
+
+## 编译 {#编译}
+
+### agentic-kit 代码编译 {#agentic-kit-代码编译}
+
+```sh
+git clone https://github.com/tuya/agentic-kit.git
+cd agentic-kit
+
+git submodule update --init --recursive
+
+mkdir -p build && cd build
+cmake .. && make
+```
+
+CMakeLists.txt 会自动选择平台对应的预编译库目录（位于 `modules/rtc-client/libs/`）：
+
+| 平台 | 库目录 |
+|------|--------|
+| macOS arm64 | `modules/rtc-client/libs/macos_arm64/` |
+| Linux x86_64 | `modules/rtc-client/libs/linux-gnu-amd64/` |
+| Linux aarch64 | `modules/rtc-client/libs/linux-gnu-aarch64/` |
+
+其他可用预编译库：`modules/rtc-client/libs/rockchip830-arm/`、`modules/rtc-client/libs/ingenic-mips/`。交叉编译这两个平台时，库目录的选择逻辑硬编码在根 `CMakeLists.txt` 的平台判断中（`STEAM_CLIENT_LIB_DIR`），需自行修改该处指向对应目录。
+
+
+### 示例代码编译 {#示例代码编译}
+
+#### POSIX 系统示例 {#posix-系统示例}
+
+Posix 示例位于 `examples/posix/` 目录下，使用 CMake 构建系统：
+
+```sh
+cd examples/posix
+mkdir -p build && cd build
+cmake .. && make
+```
+
+> 构建时会通过 FetchContent 自动拉取示例所需的第三方库（qrcodegen、quirc、stb），无需手动安装。
+
+
+#### ESP-IDF 系统示例 {#esp-idf-系统示例}
+
+ESP-IDF 示例位于 `examples/esp-idf/` 目录下，使用 ESP-IDF 构建系统：
+
+```sh
+cd examples/esp-idf/ai/rtc-tcp-client
+idf.py build
+idf.py flash monitor
+```
+
+## 运行示例 {#运行示例}
+
+编译成功后，在 `examples/posix/` 目录下运行（POSIX 平台示例）：
+
+```sh
+# --- AI 实时交互：rtc-tcp-client（源码）---
+./build/text_chat_demo                 # 文本对话
+./build/audio_chat_demo input.wav      # 语音对话（需 libopus；省略文件则发文字问候，WAV 须为单声道 16-bit）
+./build/edu_camera_demo res/test.jpg   # 拍照识物 + TTS
+./build/music_play_demo                # 音乐播放（文本触发音乐技能，下载试听片段）
+./build/mcp_demo                       # 设备 MCP（initialize 握手 + 工具调用）
+./build/agent_trigger_demo             # 智能体触发器（上报 DP 触发云端规则，接收主动推送）
+
+# --- AI 实时交互：rtc-client（预编译库，stm_open API）---
+./build/udp_chat_demo                          # 语音聊天
+
+# 设备扫码配网示例（默认使用 res/qr.jpg）
+./build/scan_by_device_pair_demo
+
+# 查询绑定状态，接收解绑通知（protocol 11）后再次查询并输出结果
+./build/unbind_demo <devid> <secret_key> <local_key>
+
+# 设备侧主动解绑：与激活成对，放在激活示例里
+./build/activate_demo <token> --release
+```
+
+> 上述 AI demo 均内置默认设备凭据，可直接运行；要用自己的设备时，多数 demo 支持追加 `[devid] [secret_key] [local_key]` 参数（`agent_trigger_demo` 用命名参数，见 `--help`）。`audio_chat_demo` 仅在检测到 libopus 时才会编译。
+
+
