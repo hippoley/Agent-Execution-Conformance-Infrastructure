@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { createFakeTuyaService } from '../runners/fake-tuya-service.mjs';
 import { FakeTuyaClient } from '../adapters/fake-tuya-client.mjs';
 import { executeWorkflow, validateWorkflow } from '../runners/workflow-engine.mjs';
+import { executeAgentScopeNode } from '../adapters/agentscope-workflow-bridge.mjs';
 const folder=dirname(fileURLToPath(import.meta.url));
 const valid=s=>typeof s==='string' && /^[A-Za-z0-9_-]{1,48}$/.test(s);
 const respond=(res,status,value,type='application/json')=>{res.writeHead(status,{'content-type':type,'cache-control':'no-store','x-content-type-options':'nosniff','content-security-policy':"default-src 'self'; style-src 'self'; script-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none'"});res.end(type==='application/json'?JSON.stringify(value):value)};
@@ -62,9 +63,11 @@ export async function createAdmin({dataFile=join(process.cwd(),'.local','agentpa
     if(activeRuns.has(workflow.id))return respond(res,409,{error:'WORKFLOW_ALREADY_RUNNING'});
     activeRuns.add(workflow.id);
     const allowed=db.devices.filter(d=>a.devices.includes(d.id));
+    const useToolkit=process.env.AGENTPANEL_WORKFLOW_BACKEND==='agentscope';
     let result;
     try{result=await executeWorkflow({definition:workflow.definition,tenant:a.tenant,workflowId:workflow.id,authorizedDevices:allowed,
        acquire:async id=>(await fake(db.devices.find(d=>d.id===id))).client,
+       dispatchNode:useToolkit ? ({client,node,commandId})=>executeAgentScopeNode({client,on:node.on,commandId}):undefined,
        saveRun:async run=>{const index=db.runs.findIndex(r=>r.id===run.id);const copy=structuredClone(run);if(index<0)db.runs.unshift(copy);else db.runs[index]=copy;db.runs=db.runs.slice(0,250);await save()}});
     }finally{activeRuns.delete(workflow.id)}
     return respond(res,result.status==='DENIED'?403:200,result);

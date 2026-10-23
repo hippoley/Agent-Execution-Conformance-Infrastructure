@@ -18,7 +18,7 @@ export function validateWorkflow(definition, { tenant, authorizedDevices }) {
   return null;
 }
 
-export async function executeWorkflow({ definition, tenant, authorizedDevices, acquire, saveRun, workflowId }) {
+export async function executeWorkflow({ definition, tenant, authorizedDevices, acquire, saveRun, workflowId, dispatchNode }) {
   const reason = validateWorkflow(definition, {tenant, authorizedDevices});
   if (reason) return {status:'DENIED',reason};
   const run = {id:randomUUID(), workflowId, tenant, startedAt:new Date().toISOString(),status:'RUNNING',nodes:[],evidence:'FAKE_DEVICE_HTTP_ONLY'};
@@ -30,8 +30,9 @@ export async function executeWorkflow({ definition, tenant, authorizedDevices, a
     await saveRun(run); // persist the command identity before sending anything
     try {
       const client = await acquire(node.deviceId);
-      const command = client.commandForLamp(node.on,step.commandId);
-      const result = await client.execute(command);
+      const result = dispatchNode ? await dispatchNode({client,node,commandId:step.commandId})
+        : await client.execute(client.commandForLamp(node.on,step.commandId));
+      if (result.executor) step.executor = result.executor;
       step.status = result.status;
     } catch {
       step.status = 'UNKNOWN_RECONCILIATION_REQUIRED';

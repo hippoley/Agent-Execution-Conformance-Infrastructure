@@ -8,6 +8,7 @@ import json
 import hashlib
 import time
 import uuid
+import re
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
@@ -22,7 +23,7 @@ class FakeTuyaLampTool(ToolBase):
     description = "Set an authorized low-risk test lamp in the isolated fake Tuya service."
     input_schema = {
         "type": "object",
-        "properties": {"on": {"type": "boolean"}},
+        "properties": {"on": {"type": "boolean"}, "command_id": {"type": "string", "pattern": "^[A-Za-z0-9_-]{1,80}$"}},
         "required": ["on"],
         "additionalProperties": False,
     }
@@ -60,8 +61,8 @@ class FakeTuyaLampTool(ToolBase):
         except HTTPError as exc:
             return exc.code, json.loads(exc.read())
 
-    def _execute(self, on: bool):
-        command_id = str(uuid.uuid4())
+    def _execute(self, on: bool, command_id: str | None = None):
+        command_id = command_id or str(uuid.uuid4())
         now = int(time.time())
         command = {
             "schema_version": "1", "command_id": command_id, "tenant_id": self.tenant,
@@ -92,13 +93,15 @@ class FakeTuyaLampTool(ToolBase):
             pass
         return {"status": "UNKNOWN_RECONCILIATION_REQUIRED", "command_id": command_id}
 
-    async def call(self, on: bool):
+    async def call(self, on: bool, command_id: str | None = None):
         # Toolkit.call_tool is a low-level execution API: it does not itself
         # invoke the Agent permission engine. Always fail closed here too.
         if not self.allow_test_execution:
             return ToolChunk(content=[TextBlock(text='{"status":"DENIED_BY_TEST_GATE"}')], state=ToolResultState.DENIED)
         if type(on) is not bool:
             return ToolChunk(content=[TextBlock(text='{"status":"INVALID_ARGUMENTS"}')], state=ToolResultState.ERROR)
-        result = await asyncio.to_thread(self._execute, on)
+        if command_id is not None and (not isinstance(command_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,80}", command_id)):
+            return ToolChunk(content=[TextBlock(text='{"status":"INVALID_COMMAND_ID"}')], state=ToolResultState.ERROR)
+        result = await asyncio.to_thread(self._execute, on, command_id)
         return ToolChunk(content=[TextBlock(text=json.dumps(result))],
                          state=ToolResultState.SUCCESS if result["status"] == "CONFIRMED_IN_FAKE_SERVICE" else ToolResultState.ERROR)
