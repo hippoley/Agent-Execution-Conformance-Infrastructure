@@ -1,0 +1,622 @@
+#ifndef _IOT_CLIENT_H_
+#define _IOT_CLIENT_H_
+
+#include <stdint.h>
+#include <stddef.h>
+#include <stdbool.h>
+
+#include "pal.h"
+#include "log.h"
+#include "tls.h"
+
+#if defined(__GNUC__) && (__GNUC__ >= 4)
+#define IOT_API __attribute__((visibility("default")))
+#else
+#define IOT_API
+#endif
+
+/* ---- Error codes ---- */
+
+#define OPRT_OK                       (0x0000)  // 0, Execution successful
+#define OPRT_COMMUNICATION_ERROR      (-0x0001) //-1, Communication error
+#define OPRT_INVALID_PARAMETER        (-0x0002) //-2, Invalid parameter
+#define OPRT_INVALID_RESULT           (-0x0003) //-3, Invalid result
+#define OPRT_UNINITIALIZED            (-0x0004) //-4, Uninitialized
+#define OPRT_NOT_SUPPORTED            (-0x0005) //-5, Not supported
+#define OPRT_MALLOC_FAILED            (-0x0006) //-6, Memory allocation failed
+#define OPRT_TLS_HANDSHAKE_FAILED     (-0x0007) //-7, TLS handshake failed
+
+/* -0x0008..-0x000C are used by iot_dp.h (DP error codes) */
+#define OPRT_OTA_VERIFY_FAILED        (-0x000D) //-13, OTA firmware digest mismatch
+#define OPRT_ATOP_BUSINESS_ERROR      (-0x000E) //-14, ATOP call reached the cloud but was rejected (see errorCode)
+
+/* ---- Logging subsystem ----
+ * The IoT SDK shares the process-wide log facade (see log.h).
+ * To take over the dispatch (destination, format): define AGENTIC_KIT_LOG;
+ * a function target can reuse the default output via log_emit_valist();
+ * To quiet the SDK: build with -DAGENTIC_KIT_LOG_LEVEL=N (no runtime level
+ * and no runtime handler -- the destination is a compile-time fact);
+ * to quiet only iot-client: -DAGENTIC_KIT_IOT_LOG_LEVEL=N (defaults to
+ * the SDK-wide ceiling; cannot exceed it).
+ */
+
+typedef enum {
+    AY = 0,
+    AZ,
+    UEAZ,
+    EU,
+    WEAZ,
+    IN,
+    SG
+} iot_region_t;
+
+typedef enum {
+    PROD = 0,
+    PRE,
+    TEST,
+} iot_env_t;
+
+/** Buffer sizes for the cloud's rejection strings (see iot_atop_rejection_t). */
+#define IOT_ATOP_ERROR_CODE_LEN  48
+#define IOT_ATOP_ERROR_MSG_LEN   128
+
+/**
+ * @brief Why the cloud rejected a call.
+ *
+ * A rejection is the cloud reaching a verdict and saying no: the envelope is
+ * well-formed, `errorCode` takes the place of `result`. The code is the
+ * discriminator the caller acts on — the same rejection surfaces as
+ * OPRT_ATOP_BUSINESS_ERROR no matter *why* the cloud refused, and those whys
+ * need opposite responses (a device removed from the cloud should re-provision;
+ * a product whose privacy agreement is unsigned must NOT).
+ *
+ * `code` is "" unless the call came back OPRT_ATOP_BUSINESS_ERROR.
+ */
+typedef struct {
+    char code[IOT_ATOP_ERROR_CODE_LEN]; /**< cloud errorCode, e.g. "GATEWAY_NOT_EXISTS" */
+    char msg[IOT_ATOP_ERROR_MSG_LEN];   /**< cloud errorMsg, human-readable */
+} iot_atop_rejection_t;
+
+/**
+ * @brief Initialize IoT SDK with the built-in default PAL adapter (POSIX / FreeRTOS).
+ *
+ * Must be called before any other SDK function.  Logging is dispatched
+ * through the log facade — the destination is a compile-time fact: define
+ * AGENTIC_KIT_LOG (log.h) for non-default output.
+ *
+ * @return OPRT_OK on success
+ */
+IOT_API int iot_init_default(void);
+
+/**
+ * @brief Initialize IoT SDK with a custom PAL adapter.
+ *
+ * Must be called before any other SDK function. The PAL struct must not be
+ * NULL and all required function pointers must be set; otherwise returns
+ * OPRT_INVALID_PARAMETER.
+ *
+ * @param[in] pal  PAL adapter (non-NULL, all required function pointers required)
+ * @return OPRT_OK on success, OPRT_INVALID_PARAMETER if pal is NULL or incomplete
+ */
+IOT_API int iot_init(const pal_t *pal);
+
+/**
+ * @brief Callback for incoming MQTT messages (already decrypted).
+ *
+ * @param topic     MQTT topic string.
+ * @param topic_len Length of topic.
+ * @param data      Decrypted payload bytes.
+ * @param data_len  Length of decrypted payload.
+ */
+typedef void (*iot_message_callback_t)(const char *topic, size_t topic_len,
+                                       const uint8_t *data, size_t data_len);
+
+/**
+ * @brief Callback for authenticated AI control messages delivered over MQTT.
+ *
+ * Fires on the thread calling iot_client_process(). The type and JSON data are
+ * borrowed and remain valid only for the callback duration. Keep the callback
+ * non-blocking and copy anything retained after it returns.
+ *
+ * A protocol-9000 notice this layer cannot scope -- a non-object data or
+ * data.data, a non-string type, or a re-serialization allocation failure --
+ * is left unconsumed and continues to the raw message callback.
+ *
+ * @param type      Control event type, such as "asrInterrupt".
+ * @param json_data Serialized event-specific data; not necessarily an object.
+ *                 Re-serialized from the parsed notice with cJSON (unformatted),
+ *                 so its byte layout can differ from the original wire bytes.
+ * @param data_len  Length of @p json_data, excluding any terminating NUL.
+ * @param user_data Opaque pointer supplied at registration.
+ */
+typedef void (*ai_ctrl_callback_t)(const char *type, const char *json_data,
+                                   size_t data_len, void *user_data);
+
+/**
+ * @brief Reset type classification (mirrors TuyaOpen TUYA_RESET_TYPE_REMOTE_*).
+ *
+ * Inbound only: how to read a device-remove the cloud pushed at us. The
+ * outbound choice -- what to ask the cloud for -- is iot_reset_scope_t.
+ */
+typedef enum {
+    IOT_RESET_REMOTE_UNBIND = 0,  // user removed the device (re-bind allowed)
+    IOT_RESET_REMOTE_FACTORY,     // cloud-ordered factory reset
+} iot_reset_type_t;
+
+/**
+ * @brief How much to clear when this device resets itself (iot_client_reset).
+ *
+ * The outbound counterpart of iot_reset_type_t, and the same two meanings, but
+ * kept a separate type on purpose: those constants are named REMOTE_ because
+ * they describe a push the cloud initiated, which reads backwards on a call the
+ * device makes.
+ *
+ * An enum rather than a bool because the two differ in whether they can be
+ * undone, and a bare `true` at the call site would not say which one it is.
+ */
+typedef enum {
+    /* Drop the user-device binding only. The device's cloud-side data is kept,
+     * so re-pairing can pick it up again. Maps to resetFactory=false. */
+    IOT_RESET_UNBIND_ONLY = 0,
+    /* Factory reset: the cloud additionally discards the data it holds for this
+     * device (business-specific exclusions aside). NOT reversible -- re-pairing
+     * yields a new binding, not the old state. Maps to resetFactory=true. */
+    IOT_RESET_FACTORY,
+} iot_reset_scope_t;
+
+/** Device binding status returned by tuya.device.info.sync v1.0. */
+typedef enum {
+    IOT_BINDING_STATUS_BOUND = 0,        /**< Device remains bound (`enable`) */
+    IOT_BINDING_STATUS_UNBOUND,          /**< Binding was removed (`reset`) */
+    IOT_BINDING_STATUS_FACTORY_RESET,    /**< Factory reset requested (`reset_factory`) */
+} iot_binding_status_t;
+
+/**
+ * @brief Callback fired when the cloud pushes a device-remove (protocol 11)
+ * notice over MQTT.
+ *
+ * Fired on the iot_client_process() thread, exactly like message_callback.
+ * Must NOT block (it runs inside the MQTT process loop). The recommended
+ * action is to set a flag and let the app loop tear down (disconnect → wipe
+ * persisted credentials/schema/DP state → restart on-boarding). Do NOT call
+ * iot_client_deinit() or iot_client_disconnect() from within this
+ * callback — both free the mqtt client that the coreMQTT receive loop is
+ * still using on this very stack (it dereferences the context again to send
+ * acks and compact the network buffer after the callback returns).
+ *
+ * Registering this callback opts the client in to consuming protocol-11
+ * notices: they then never reach the DP layer or the raw message_callback.
+ * Without it they stay on the message_callback path.
+ *
+ * @param type      Reset classification (remote unbind vs. factory reset).
+ * @param user_data The reset_user_data pointer registered with the config.
+ */
+typedef void (*iot_reset_callback_t)(iot_reset_type_t type, void *user_data);
+
+/**
+ * @brief Callback fired when the cloud confirms an OTA upgrade from the app.
+ *
+ * Fired on the iot_client_process() thread, exactly like message_callback.
+ * This means the app user has confirmed the upgrade and the cloud has notified
+ * the device over MQTT protocol 15. Keep this callback non-blocking: set a
+ * flag, signal a semaphore, or enqueue work for an application worker. Do not
+ * call iot_ota_check_upgrade(), download firmware, or write flash here — those
+ * operations must run outside the MQTT process loop.
+ *
+ * Registering this callback opts the client in to consuming protocol-15
+ * notices: they then never reach the DP layer or the raw message_callback.
+ * Without it they stay on the message_callback path for compatibility.
+ *
+ * @param channel   Firmware channel from data.firmwareType (0 = main MCU).
+ * @param user_data The ota_confirm_user_data pointer registered with the config.
+ */
+typedef void (*iot_ota_confirm_callback_t)(int channel, void *user_data);
+
+/**
+ * @brief IoT client configuration structure
+ */
+typedef struct {
+    char devid[32];                // Device ID
+    char secret_key[32];           // Secret key
+    char local_key[32];            // Local key
+    iot_region_t region;           // Region
+    iot_env_t env;                 // Environment
+    bool mqtt_disable_tls;         // false = mqtts (TLS, default), true = mqtt (TCP)
+    bool mqtt_disable_auto_connect; // false (default) = connect MQTT after init/activation; true = caller invokes iot_client_connect() manually
+    bool skip_version_report;       // false (default) = report both; true = skip both during init (set only when cloud already has current version)
+    const char *cacert;            // CA cert for all TLS (MQTT/HTTPS/IoT-DNS) (PEM, caller-owned, must outlive client)
+    tls_cert_bundle_attach_fn cert_bundle_attach; // Platform cert-bundle callback (NULL = none)
+    iot_message_callback_t message_callback; // MQTT message callback
+    iot_reset_callback_t reset_callback;     // Cloud device-remove (protocol 11) callback
+    void *reset_user_data;                   // Opaque pointer passed back to reset_callback
+    iot_ota_confirm_callback_t ota_confirm_callback; // APP-confirmed OTA (protocol 15) callback
+    void *ota_confirm_user_data;                      // Opaque pointer passed back to ota_confirm_callback
+
+    /* ---- DP layer restore (all caller-owned, may be NULL) ---- */
+    const char *schema;            // Persisted DP schema JSON to restore on restart (NULL = none / loose mode)
+    const char *schema_id;         // Persisted schema id (stable key for schema upgrade query)
+    const char *dp_state;          // Persisted DP current state {"dps":{...}} to restore (no dirty, no report)
+    const char *sw_ver;            // Application firmware version (e.g. "1.2.3"); NULL = use SDK default IOT_SDK_SW_VER
+} iot_client_config_t;
+
+/**
+ * @brief IoT on boarding configuration structure
+ */
+typedef struct {
+    char uuid[32];
+    char authkey[64];
+    char product_key[32];
+    char firmware_key[64];
+    const char *modules;
+    const char *feature;
+    const char *skill_param;
+    int timeout_ms;
+    iot_env_t env;                 // PROD (default) or PRE
+    bool mqtt_disable_tls;         // false = mqtts (TLS, default), true = mqtt (TCP)
+    bool mqtt_disable_auto_connect; // false (default) = connect MQTT after init/activation; true = caller invokes iot_client_connect() manually
+    bool skip_version_report;       // false (default) = report both; true = skip both during init (only when cloud already has current version)
+    const char *cacert;            // CA cert for all TLS (MQTT/HTTPS/IoT-DNS) (PEM, caller-owned, must outlive client)
+    tls_cert_bundle_attach_fn cert_bundle_attach; // Platform cert-bundle callback (NULL = none)
+    iot_message_callback_t message_callback; // MQTT message callback
+    iot_reset_callback_t reset_callback;     // Cloud device-remove (protocol 11) callback
+    void *reset_user_data;                   // Opaque pointer passed back to reset_callback
+    iot_ota_confirm_callback_t ota_confirm_callback; // APP-confirmed OTA (protocol 15) callback
+    void *ota_confirm_user_data;                      // Opaque pointer passed back to ota_confirm_callback
+    const char *sw_ver;            // Application firmware version (e.g. "1.2.3"); NULL = use SDK default IOT_SDK_SW_VER
+} iot_on_boarding_config_t;
+
+
+/* Opaque DP-layer context; defined privately in src/iot_dp.c. Its storage is
+ * inlined into iot_client_t (dp_storage below) to avoid a per-session heap
+ * allocation; iot_dp.c _Static_asserts that the real struct fits. */
+struct iot_dp_context;
+#define IOT_DP_CONTEXT_STORAGE 128
+
+/**
+ * @brief IoT client instance structure
+ *
+ * This structure holds the state and configuration of an IoT client connection.
+ * Created by iot_client_init() and destroyed by iot_client_deinit().
+ */
+ typedef struct {
+    char devid[32];                // Device ID assigned after activation
+    char secret_key[32];           // Secret key for MQTT authentication
+    char local_key[32];            // Local encryption key for LAN communication
+    char schema_id[64];            // Device schema ID (from activation; stable key for schema upgrade)
+
+    char https_url[64];           // HTTPS endpoint URL for ATOP (inline; "" = unresolved)
+    char mqtt_url[64];            // MQTT broker URL (inline, mqtt://|mqtts://; "" = unresolved)
+    char *schema;                 // Device schema JSON (dynamically allocated)
+
+    iot_region_t region;           // Server region (AY/AZ/UEAZ/EU/WEAZ/IN/SG)
+    iot_env_t env;                 // Environment (PROD or PRE)
+    bool mqtt_disable_tls;         // false = mqtts (TLS), true = mqtt (TCP)
+    const pal_t *pal;             // PAL adapter
+
+    const char *cacert;           // CA certificate for all TLS (MQTT/HTTPS/IoT-DNS) (caller-owned, points to user buffer/flash)
+    tls_cert_bundle_attach_fn cert_bundle_attach; // Platform cert-bundle callback (borrowed, NULL = none)
+    struct mqtt_client *mqtt;     // Internal MQTT client handle
+    iot_message_callback_t message_callback;  // User callback for incoming messages
+    iot_reset_callback_t reset_callback;      // Cloud device-remove (protocol 11) callback
+    void *reset_user_data;                    // Opaque pointer passed back to reset_callback
+    iot_ota_confirm_callback_t ota_confirm_callback; // APP-confirmed OTA (protocol 15) callback
+    void *ota_confirm_user_data;                      // Opaque pointer passed back to ota_confirm_callback
+    ai_ctrl_callback_t ai_ctrl_callback;              // AI control (protocol 9000) callback
+    void *ai_ctrl_user_data;                          // Opaque pointer passed back to ai_ctrl_callback
+
+    struct iot_dp_context *dp;    // DP layer state; points into dp_storage, NULL when inactive
+    void *dp_storage[IOT_DP_CONTEXT_STORAGE / sizeof(void *)]; // inline storage for *dp (no heap)
+ } iot_client_t;
+
+/**
+ * @brief Initialize IoT client with existing device credentials.
+ *
+ * Resolves MQTT/HTTPS endpoints via IoT DNS and establishes the MQTT
+ * connection automatically when devid is set.
+ *
+ * @param config Client configuration (devid, secret_key, local_key, region, etc.)
+ * @return Pointer to iot_client_t on success, NULL on error
+ */
+IOT_API iot_client_t *iot_client_init(const iot_client_config_t *config);
+
+/**
+ * @brief Initialize IoT client via QR code on-boarding (first-time activation).
+ *
+ * Blocks until a user scans the QR code and the device is activated, or
+ * until the configured timeout expires.  On success the returned client is
+ * fully connected; persist its devid / secret_key / local_key for future
+ * calls to iot_client_init().
+ *
+ * @param config On-boarding configuration (uuid, authkey, product_key, timeout_ms, etc.)
+ * @return Pointer to iot_client_t on success (contains devid, secret_key, local_key, schema_id), NULL on error or timeout
+ */
+IOT_API iot_client_t *iot_client_init_on_boarding(const iot_on_boarding_config_t *config);
+
+/**
+ * @brief Initialize IoT client via token on-boarding (first-time activation).
+ *
+ * Skips the QR-code MQTT activation wait and directly sends the activation
+ * request using the provided token. Region is derived from the first two
+ * characters of the token; env is taken from @p config.
+ * Does not require DNS/MQTT — calls ATOP directly.
+ *
+ * @param config On-boarding configuration (uuid, authkey, product_key, etc.)
+ * @param token  Activation token: [region:2][activation_token][secret:4]
+ * @return Pointer to iot_client_t on success, NULL on error
+ */
+IOT_API iot_client_t *iot_client_init_on_boarding_with_token(const iot_on_boarding_config_t *config, const char *token);
+
+/**
+ * @brief Tell the cloud this device is resetting (unbind), then destroy the client.
+ *
+ * Calls the cloud's device-reset interface with this device's credentials. On
+ * success every resource the client holds is released -- exactly what
+ * iot_client_deinit() frees -- and @p client is invalid on return: do not use
+ * or free it again.
+ *
+ * @p scope decides how much the cloud clears, and the two options differ in
+ * whether they can be undone:
+ * - IOT_RESET_UNBIND_ONLY drops the user-device binding and leaves the device's
+ *   cloud-side data in place, so re-pairing can pick it up again.
+ * - IOT_RESET_FACTORY additionally discards everything the cloud holds for this
+ *   device, business-specific exclusions aside. THIS IS NOT REVERSIBLE:
+ *   re-pairing yields a new binding, not the old state.
+ *
+ * Either way this is not a way to "reconnect cleanly" or to recover from an
+ * error -- both give the binding up. For those, disconnect and connect again.
+ *
+ * On failure NOTHING is destroyed: the client stays fully usable so the caller
+ * can retry, or give up and call iot_client_deinit() itself. The return code is
+ * therefore "does the cloud know", never "is the client still alive".
+ *
+ * Two things this does NOT do:
+ * - It does not erase persisted state. Credentials, DP state and schema live
+ *   wherever the app put them, so wiping them stays the app's job (see
+ *   examples/posix/pair/unbind-demo/).
+ * - It does not wait for the cloud's protocol-11 notice. That push is what a
+ *   *remote* removal looks like; a device-initiated reset is acknowledged by
+ *   this call's return code.
+ *
+ * Must NOT be called from a callback fired by iot_client_process() -- it frees
+ * the mqtt client that the coreMQTT receive loop is still using on that stack.
+ * See iot_reset_callback_t. Set a flag and reset from the app loop instead.
+ *
+ * On OPRT_ATOP_BUSINESS_ERROR the cloud's own errorCode decides what to do
+ * next, and the two cases are opposite: a terminal code such as
+ * GATEWAY_NOT_EXISTS means the binding is already gone, so retrying is
+ * pointless and the app should wipe its credentials and re-enter pairing, while
+ * REMOTE_API_RUN_UNKNOW_FAILED means the server was busy and the call should be
+ * retried. Pass @p error_code to tell them apart; without it the return code
+ * alone cannot.
+ *
+ * @param client         Pointer to iot_client_t instance (must be activated)
+ * @param scope          How much to clear (see iot_reset_scope_t); pass
+ *                       IOT_RESET_UNBIND_ONLY unless the device is being
+ *                       decommissioned
+ * @param error_code     Optional buffer receiving the cloud's errorCode; "" when
+ *                       the cloud did not send one. NULL if not needed.
+ *                       IOT_ATOP_ERROR_CODE_LEN bytes is always enough.
+ * @param error_code_len Size of @p error_code in bytes (ignored when NULL)
+ * @return OPRT_OK on success (client destroyed);
+ *         OPRT_INVALID_PARAMETER if client is NULL;
+ *         OPRT_UNINITIALIZED if the client has no device credentials yet;
+ *         OPRT_ATOP_BUSINESS_ERROR if the cloud rejected the reset;
+ *         other codes on transport failure (client left intact in every
+ *         non-OPRT_OK case)
+ */
+IOT_API int iot_client_reset(iot_client_t *client,
+                             iot_reset_scope_t scope,
+                             char *error_code, size_t error_code_len);
+
+/**
+ * @brief Destroy IoT client and release all resources.
+ *
+ * Disconnects MQTT, frees URLs, certificates, schema, and the client struct.
+ * Safe to call with NULL (no-op).
+ *
+ * @param client Pointer to iot_client_t instance (NULL is safe)
+ */
+IOT_API void iot_client_deinit(iot_client_t *client);
+
+/**
+ * @brief Connect to the MQTT broker and subscribe to the device's inbound topic.
+ *
+ * Needed on two paths: after an init/activation that set `mqtt_disable_auto_connect`
+ * false, and to re-establish a link that dropped (pair it with
+ * iot_client_disconnect() in the app's reconnect loop).
+ *
+ * There is no automatic retry and no automatic CA refresh: a TLS failure comes
+ * straight back as OPRT_TLS_HANDSHAKE_FAILED. Cert recovery belongs to the app
+ * -- on that error code, re-fetch the CA with iot_get_ca_certificate() and
+ * reassign client->cacert before reconnecting, or a reconnect loop will retry
+ * the same doomed handshake forever after a broker cert rotation. See
+ * examples/posix/dp-management/ for the shape of that loop.
+ *
+ * @param client Pointer to iot_client_t instance (must have mqtt_url and devid set)
+ * @return OPRT_OK on success, OPRT_INVALID_PARAMETER if client/url/devid is missing
+ */
+IOT_API int iot_client_connect(iot_client_t *client);
+
+/**
+ * @brief Disconnect from the MQTT broker and destroy the MQTT client.
+ *
+ * Safe to call with NULL or when not connected (no-op). Must NOT be called
+ * from inside a callback fired by iot_client_process() — see
+ * iot_reset_callback_t for why.
+ *
+ * @param client Pointer to iot_client_t instance (NULL is safe)
+ */
+IOT_API void iot_client_disconnect(iot_client_t *client);
+
+/**
+ * @brief Process MQTT events (call this in a loop to receive messages)
+ * @param client Pointer to iot_client_t instance
+ * @param timeout_ms Processing timeout in milliseconds
+ * @return OPRT_OK on success, error code on failure
+ */
+IOT_API int iot_client_process(iot_client_t *client, uint32_t timeout_ms);
+
+/**
+ * @brief Publish an encrypted message via MQTT.
+ *
+ * Encrypts @p data with AES-128-GCM (P2.3) using the client's local_key
+ * and publishes to the device's outbound topic.
+ *
+ * @param client   Pointer to iot_client_t instance
+ * @param data     Plaintext data to encrypt and send
+ * @param data_len Length of data in bytes
+ * @return OPRT_OK on success, OPRT_INVALID_PARAMETER if client is NULL
+ */
+IOT_API int iot_client_publish(iot_client_t *client, const uint8_t *data, size_t data_len);
+
+/**
+ * @brief Register the MQTT protocol-9000 AI control callback.
+ *
+ * Register before the application starts pumping MQTT messages. If commands
+ * must be observable during initial MQTT subscription, initialize with
+ * mqtt_disable_auto_connect=true, register here, then call iot_client_connect().
+ * Passing NULL as @p callback deregisters the current callback.
+ *
+ * @param client    IoT client instance.
+ * @param callback  Callback, or NULL to deregister.
+ * @param user_data Opaque pointer passed to @p callback.
+ * @return OPRT_OK, or OPRT_INVALID_PARAMETER if @p client is NULL.
+ */
+IOT_API int iot_ai_ctrl_set_callback(iot_client_t *client,
+                                     ai_ctrl_callback_t callback,
+                                     void *user_data);
+
+/**
+ * @brief Get AI agent session token from Tuya cloud.
+ *
+ * On TLS handshake failure, automatically refreshes the HTTPS CA certificate
+ * and retries once.
+ *
+ * @param client     Pointer to iot_client_t instance
+ * @param agent_code Agent code string (NULL for default)
+ * @param token      Output buffer for the token
+ * @param token_len  Size of the output buffer in bytes
+ * @return OPRT_OK on success, OPRT_INVALID_PARAMETER if client or token is NULL
+ */
+IOT_API int iot_client_get_session_token(iot_client_t *client, const char *agent_code, char *token, size_t token_len);
+
+/**
+ * @brief Get an AI agent session token, and learn why the cloud said no.
+ *
+ * Same as iot_client_get_session_token(), except that a rejection is reported
+ * instead of being flattened into a bare OPRT_ATOP_BUSINESS_ERROR. Three
+ * different causes reach this call in practice — the device removed from the
+ * cloud, a product whose privacy agreement is unsigned, and a product with no
+ * AI agent configured — and they need opposite handling, so the code has to
+ * reach the caller that knows the product.
+ *
+ * @param client     Pointer to iot_client_t instance
+ * @param agent_code Agent code string (NULL for default)
+ * @param token      Output buffer for the token
+ * @param token_len  Size of the output buffer in bytes
+ * @param rejection  Optional; zeroed on entry and filled when the return code
+ *                   is OPRT_ATOP_BUSINESS_ERROR. NULL to ignore.
+ * @return OPRT_OK on success, OPRT_INVALID_PARAMETER if client or token is NULL,
+ *         OPRT_ATOP_BUSINESS_ERROR when the cloud refused (see @p rejection).
+ */
+IOT_API int iot_client_get_session_token_ex(iot_client_t *client, const char *agent_code,
+                                            char *token, size_t token_len,
+                                            iot_atop_rejection_t *rejection);
+
+/** Parameters for querying binding status without an IoT client instance. */
+typedef struct {
+    const char *devid;              /**< Device ID from activation (required) */
+    const char *secret_key;         /**< Device secret key from activation (required) */
+    iot_region_t region;            /**< Region; zero initializes to AY */
+    iot_env_t env;                  /**< Environment; zero initializes to PROD */
+    const char *host;               /**< Optional ATOP hostname; NULL/"" uses the region endpoint */
+    uint16_t port;                  /**< Optional ATOP port; 0 uses 443 */
+    const char *cacert;             /**< Caller-owned CA certificate PEM */
+    tls_cert_bundle_attach_fn cert_bundle_attach; /**< Platform cert-bundle callback */
+} iot_binding_status_request_t;
+
+/**
+ * @brief Query cloud binding status using device credentials directly.
+ *
+ * Calls tuya.device.info.sync v1.0 with the activated device credentials.
+ * BOUND means still bound; UNBOUND and FACTORY_RESET mean the binding was
+ * removed. Call iot_init() / iot_init_default() first. No iot_client_t or MQTT
+ * connection is needed, so persisted credentials can be used when client
+ * initialization fails or after iot_client_reset() destroys the client.
+ * First activation must have provided devid + secret_key; uuid + authkey
+ * cannot replace them. local_key is not required for this ATOP interface.
+ *
+ * Uses the supplied host or the compile-time region endpoint; performs no
+ * IoT-DNS lookup. This is a blocking HTTPS request: call outside SDK callbacks.
+ * The SDK does not erase credentials or change local device state.
+ *
+ * @param request Device credentials, endpoint selection, and TLS settings.
+ * @param status Written only when a recognized status is returned.
+ * @return OPRT_OK on a recognized status, OPRT_UNINITIALIZED if iot_init() has
+ *         not run, OPRT_INVALID_PARAMETER for bad arguments or a secret key
+ *         shorter than 16 bytes, OPRT_INVALID_RESULT for an absent/unknown
+ *         cloud status, or the ATOP/transport error otherwise.
+ */
+IOT_API int iot_get_binding_status(const iot_binding_status_request_t *request,
+                                  iot_binding_status_t *status);
+
+/**
+ * @brief Query cloud binding status using an existing IoT client's settings.
+ *
+ * Convenience wrapper for iot_get_binding_status(). Uses the client's device
+ * credentials, resolved ATOP endpoint, and TLS settings; MQTT need not be
+ * connected. If client initialization failed, call iot_get_binding_status()
+ * with persisted credentials instead. Call outside SDK callbacks.
+ *
+ * @param client Initialized IoT client with device credentials.
+ * @param status Written only when a recognized status is returned.
+ * @return As for iot_get_binding_status(); OPRT_UNINITIALIZED also indicates
+ *         that the client has no device credentials.
+ */
+IOT_API int iot_client_get_binding_status(iot_client_t *client, iot_binding_status_t *status);
+
+/**
+ * @brief Get CA certificate for a target host via IoT DNS service.
+ *
+ * @param client             Pointer to iot_client_t instance (must not be NULL)
+ * @param host               Target host to get certificate for
+ * @param port               Target port
+ * @param ca_certificate     Caller-provided buffer receiving the NUL-terminated
+ *                           CA certificate PEM string (a single CA PEM is
+ *                           typically 1-2 KB; 4096 bytes is a safe size)
+ * @param ca_certificate_len Size of the ca_certificate buffer in bytes
+ * @return OPRT_OK on success, OPRT_INVALID_PARAMETER if client/host/ca_certificate
+ *         is NULL or ca_certificate_len is 0, OPRT_INVALID_RESULT if no CA cert
+ *         is available or the buffer is too small
+ */
+IOT_API int iot_get_ca_certificate(iot_client_t *client, const char *host, uint16_t port, char *ca_certificate, size_t ca_certificate_len);
+
+/**
+ * @brief QR code info request parameters
+ */
+typedef struct {
+    const char *uuid;         // Device UUID (used for signing)
+    const char *authkey;      // Auth key (used for signing)
+    const char *app_id;       // App ID (empty string if not specified)
+    int type;                 // QR code type
+    iot_region_t region;      // Region (AY = China, default)
+    iot_env_t env;            // Environment (PROD or PRE)
+    const char *cacert;       // CA cert for HTTPS/IoT-DNS TLS (PEM, caller-owned)
+    tls_cert_bundle_attach_fn cert_bundle_attach; // Platform cert-bundle callback (NULL = none)
+} iot_qrcode_request_t;
+
+/**
+ * @brief Get the QR code activation URL from Tuya cloud.
+ *
+ * Resolves the ATOP endpoint and CA certificate via IoT DNS automatically —
+ * does not require an initialized client.
+ *
+ * @param[in]  request  Request parameters (uuid, authkey, app_id, type, region, env)
+ * @param[out] url      Caller-provided buffer receiving the NUL-terminated URL
+ * @param[in]  url_len  Size of the url buffer in bytes
+ * @return OPRT_OK on success, OPRT_INVALID_PARAMETER if request or url is NULL
+ *         or url_len is 0, OPRT_INVALID_RESULT if the buffer is too small
+ */
+IOT_API int iot_get_qrcode_info(const iot_qrcode_request_t *request, char *url, size_t url_len);
+
+#endif /* _IOT_CLIENT_H_ */

@@ -1,0 +1,866 @@
+/**
+ * @file iot_atop_call_test.c
+ * @brief Tests for the generic ATOP entry point (iot_atop_call).
+ *
+ * Covers argument guards, the credential requirement, body validation, result
+ * pass-through and error pass-through. The envelope error contract this relies
+ * on is tested in atop_test.c.
+ *
+ * The client is a stack iot_client_t with devid/secret_key/https_url set, so no
+ * activation or MQTT connection is needed; https_url points the ATOP host
+ * resolution at the mock server.
+ */
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <signal.h>
+#include <unistd.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <sys/wait.h>
+#include <sys/socket.h>
+#include <sys/select.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <time.h>
+
+#include "iot_atop.h"
+#include "cJSON.h"
+#include "iot_client.h"
+#include "iot_internal.h"
+#include "http_client_interface.h"
+#include "test_log.h"
+#include "log.h"
+
+#include <stdarg.h>
+
+#define MOCK_HOST "127.0.0.1"
+#define MOCK_PORT 8443
+
+/* Must match test/config/atop.conf (device_id / sec_key). */
+#define TEST_DEVID   "ci_device_test_001"
+#define TEST_SEC_KEY "1234567890abcdef"
+
+static pid_t mock_pid = -1;
+static int tests_run = 0;
+static int tests_passed = 0;
+static char *g_cacert = NULL;
+static iot_client_t g_client;
+static char g_sync_status_file[96];
+
+static int set_sync_status(const char *status)
+{
+    FILE *f = fopen(g_sync_status_file, "w");
+    if (f == NULL) return -1;
+    int wrote = fputs(status, f) >= 0;
+    int closed = fclose(f) == 0;
+    int ok = wrote && closed;
+    return ok ? 0 : -1;
+}
+
+static char *load_file(const pal_t *pal, const char *path)
+{
+    FILE *f = fopen(path, "rb");
+    if (!f) return NULL;
+    fseek(f, 0, SEEK_END);
+    long len = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    char *buf = pal->malloc(len + 1);
+    if (buf) {
+        size_t read_len = fread(buf, 1, len, f);
+        if (read_len != (size_t)len) {
+            pal->free(buf);
+            fclose(f);
+            return NULL;
+        }
+        buf[len] = '\0';
+    }
+    fclose(f);
+    return buf;
+}
+
+#define RUN_TEST(fn)                                       \
+    do {                                                   \
+        tests_run++;                                       \
+        printf("\n--- [%d] %s ---\n", tests_run, #fn);     \
+        if ((fn)() == 0) {                                 \
+            tests_passed++;                                \
+            printf("  PASS\n");                            \
+        } else {                                           \
+            printf("  FAIL\n");                            \
+        }                                                  \
+    } while (0)
+
+/* ---------- Mock server lifecycle (same probe as iot_ota_test) ---------- */
+
+static int wait_for_port(uint16_t port, int timeout_ms)
+{
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_port   = htons(port);
+    inet_pton(AF_INET, MOCK_HOST, &addr.sin_addr);
+
+    const int step_ms = 50;
+    for (int waited = 0; waited <= timeout_ms; waited += step_ms) {
+        int fd = socket(AF_INET, SOCK_STREAM, 0);
+        if (fd >= 0) {
+            int fl = fcntl(fd, F_GETFL, 0);
+            fcntl(fd, F_SETFL, fl | O_NONBLOCK);
+            int rc = connect(fd, (struct sockaddr *)&addr, sizeof(addr));
+            if (rc == 0) { close(fd); return 0; }
+            if (rc < 0 && errno == EINPROGRESS) {
+                fd_set wfds; FD_ZERO(&wfds); FD_SET(fd, &wfds);
+                struct timeval tv = { .tv_sec = 0, .tv_usec = 300 * 1000 };
+                if (select(fd + 1, NULL, &wfds, NULL, &tv) > 0) {
+                    int err = 0; socklen_t len = sizeof(err);
+                    getsockopt(fd, SOL_SOCKET, SO_ERROR, &err, &len);
+                    if (err == 0) { close(fd); return 0; }
+                }
+            }
+            close(fd);
+        }
+        usleep(step_ms * 1000);
+    }
+    return -1;
+}
+
+static int start_mock_server(void)
+{
+    mock_pid = fork();
+    if (mock_pid == 0) {
+        setenv("ATOP_MOCK_USE_SSL", "1", 1);
+        setenv("ATOP_MOCK_SYNC_STATUS_FILE", g_sync_status_file, 1);
+        execlp(PYTHON3_EXEC, PYTHON3_EXEC, MOCK_SCRIPT_PATH, NULL);
+        perror("execlp failed");
+        _exit(1);
+    }
+    if (mock_pid < 0) {
+        perror("fork");
+        return -1;
+    }
+    printf("Mock server started (pid %d, port %u), waiting for ready...\n", mock_pid, MOCK_PORT);
+    if (wait_for_port(MOCK_PORT, 15000) != 0) {
+        fprintf(stderr, "ATOP mock (%u) never became connectable\n", MOCK_PORT);
+        return -1;
+    }
+    return 0;
+}
+
+static void stop_mock_server(void)
+{
+    if (mock_pid > 0) {
+        printf("Stopping mock server (pid %d)...\n", mock_pid);
+        kill(mock_pid, SIGTERM);
+        waitpid(mock_pid, NULL, 0);
+        mock_pid = -1;
+    }
+}
+
+/* ---------- iot_atop_call: guards ---------- */
+
+static int test_null_params(void)
+{
+    iot_atop_request_t req = { .api = "tuya.device.meta.save", .version = "1.0" };
+    iot_atop_response_t resp = {0};
+
+    if (iot_atop_call(NULL, &req, &resp) != OPRT_INVALID_PARAMETER ||
+        iot_atop_call(&g_client, NULL, &resp) != OPRT_INVALID_PARAMETER ||
+        iot_atop_call(&g_client, &req, NULL) != OPRT_INVALID_PARAMETER) {
+        printf("  NULL guards failed\n");
+        return -1;
+    }
+    iot_atop_response_free(&g_client, NULL);  /* must be a safe no-op */
+    return 0;
+}
+
+static int test_api_and_version_required(void)
+{
+    iot_atop_response_t resp = {0};
+    const iot_atop_request_t bad[] = {
+        { .api = NULL,                       .version = "1.0" },
+        { .api = "",                         .version = "1.0" },
+        { .api = "tuya.device.meta.save",    .version = NULL  },
+        { .api = "tuya.device.meta.save",    .version = ""    },
+    };
+
+    for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+        int rt = iot_atop_call(&g_client, &bad[i], &resp);
+        if (rt != OPRT_INVALID_PARAMETER) {
+            printf("  case %zu returned %d, expected OPRT_INVALID_PARAMETER\n", i, rt);
+            return -1;
+        }
+    }
+    return 0;
+}
+
+static int test_requires_device_credentials(void)
+{
+    iot_client_t bare = g_client;
+    bare.devid[0] = '\0';
+
+    iot_atop_request_t req = { .api = "tuya.device.meta.save", .version = "1.0" };
+    iot_atop_response_t resp = {0};
+
+    int rt = iot_atop_call(&bare, &req, &resp);
+    if (rt != OPRT_UNINITIALIZED) {
+        printf("  returned %d, expected OPRT_UNINITIALIZED\n", rt);
+        return -1;
+    }
+
+    bare = g_client;
+    bare.secret_key[0] = '\0';
+    rt = iot_atop_call(&bare, &req, &resp);
+    if (rt != OPRT_UNINITIALIZED) {
+        printf("  empty secret_key returned %d, expected OPRT_UNINITIALIZED\n", rt);
+        return -1;
+    }
+    return 0;
+}
+
+/* A malformed body is caught locally, before spending an HTTPS round trip. */
+static int test_body_must_be_json_object(void)
+{
+    iot_atop_response_t resp = {0};
+    const char *bad_bodies[] = {
+        "{not json",
+        "[1,2,3]",      /* valid JSON, but an array is not a request body */
+        "\"string\"",
+        "42",
+        "{}garbage",    /* trailing garbage after a complete value */
+        "{\"t\":1}}",
+    };
+
+    for (size_t i = 0; i < sizeof(bad_bodies) / sizeof(bad_bodies[0]); i++) {
+        iot_atop_request_t req = { .api = "tuya.device.meta.save",
+                                   .version = "1.0",
+                                   .data = bad_bodies[i] };
+        int rt = iot_atop_call(&g_client, &req, &resp);
+        if (rt != OPRT_INVALID_PARAMETER) {
+            printf("  body %zu (%s) returned %d, expected OPRT_INVALID_PARAMETER\n",
+                   i, bad_bodies[i], rt);
+            iot_atop_response_free(&g_client, &resp);
+            return -1;
+        }
+    }
+    return 0;
+}
+
+/* ---------- iot_atop_call: round trips ---------- */
+
+static int test_call_returns_result_json(void)
+{
+    char body[128];
+    snprintf(body, sizeof(body),
+             "{\"metas\":{\"smain_network_sdk_full_version\":\"test 0.1\"},\"t\":%u}",
+             (unsigned)time(NULL));
+
+    iot_atop_request_t req = { .api = "tuya.device.meta.save",
+                               .version = "1.0",
+                               .data = body };
+    iot_atop_response_t resp = {0};
+
+    int rt = iot_atop_call(&g_client, &req, &resp);
+    if (rt != OPRT_OK) {
+        printf("  returned %d (%s / %s), expected OPRT_OK\n",
+               rt, resp.error_code, resp.error_msg);
+        iot_atop_response_free(&g_client, &resp);
+        return -1;
+    }
+    if (resp.error_code[0] != '\0') {
+        printf("  error_code should be empty on success, got \"%s\"\n", resp.error_code);
+        iot_atop_response_free(&g_client, &resp);
+        return -1;
+    }
+    if (resp.result == NULL || strcmp(resp.result, "true") != 0) {
+        printf("  result is \"%s\", expected \"true\"\n",
+               resp.result ? resp.result : "(null)");
+        iot_atop_response_free(&g_client, &resp);
+        return -1;
+    }
+    if (resp.server_time <= 0) {
+        printf("  server_time was not carried out of the envelope\n");
+        iot_atop_response_free(&g_client, &resp);
+        return -1;
+    }
+    printf("  result=%s server_time=%d\n", resp.result, resp.server_time);
+    iot_atop_response_free(&g_client, &resp);
+    return 0;
+}
+
+/* A non-scalar result comes back as its JSON text, unparsed -- that is the
+ * contract: cJSON stays out of the public ABI. */
+static int test_call_returns_json_array(void)
+{
+    char body[160];
+    snprintf(body, sizeof(body),
+             "{\"schemaId\":\"test_schema_id\",\"version\":\"\",\"t\":%u}",
+             (unsigned)time(NULL));
+
+    iot_atop_request_t req = { .api = "tuya.device.schema.newest.get",
+                               .version = "1.0",
+                               .data = body };
+    iot_atop_response_t resp = {0};
+
+    int rt = iot_atop_call(&g_client, &req, &resp);
+    if (rt != OPRT_OK || resp.result == NULL) {
+        printf("  returned %d, result=%s\n", rt, resp.result ? resp.result : "(null)");
+        iot_atop_response_free(&g_client, &resp);
+        return -1;
+    }
+    if (resp.result[0] != '[') {
+        printf("  expected a JSON array, got: %.40s\n", resp.result);
+        iot_atop_response_free(&g_client, &resp);
+        return -1;
+    }
+    printf("  result=%.60s...\n", resp.result);
+    iot_atop_response_free(&g_client, &resp);
+    return 0;
+}
+
+/* A NULL body means "{}" -- enough for interfaces that take no arguments. */
+static int test_null_body_defaults_to_empty_object(void)
+{
+    iot_atop_request_t req = { .api = "tuya.device.schema.newest.get",
+                               .version = "1.0",
+                               .data = NULL };
+    iot_atop_response_t resp = {0};
+
+    int rt = iot_atop_call(&g_client, &req, &resp);
+    if (rt != OPRT_OK) {
+        printf("  returned %d (%s), expected OPRT_OK\n", rt, resp.error_code);
+        iot_atop_response_free(&g_client, &resp);
+        return -1;
+    }
+    iot_atop_response_free(&g_client, &resp);
+    return 0;
+}
+
+/* A {"result":null} envelope means "nothing to report" -- it must come back as
+ * a NULL pointer, never as the four-character string "null". */
+static int test_null_result_stays_null(void)
+{
+    char body[64];
+    snprintf(body, sizeof(body), "{\"t\":%u}", (unsigned)time(NULL));
+
+    iot_atop_request_t req = { .api = "tuya.test.result.null",
+                               .version = "1.0",
+                               .data = body };
+    iot_atop_response_t resp = {0};
+
+    int rt = iot_atop_call(&g_client, &req, &resp);
+    if (rt != OPRT_OK) {
+        printf("  returned %d (%s), expected OPRT_OK\n", rt, resp.error_code);
+        iot_atop_response_free(&g_client, &resp);
+        return -1;
+    }
+    if (resp.result != NULL) {
+        printf("  result is \"%s\", expected NULL for a JSON null\n", resp.result);
+        iot_atop_response_free(&g_client, &resp);
+        return -1;
+    }
+    iot_atop_response_free(&g_client, &resp);
+    return 0;
+}
+
+/* GATEWAY_NOT_EXISTS historically mapped to OPRT_COMMUNICATION_ERROR, which the
+ * documented return-code table classifies as retryable transport failure -- a
+ * permanent-retry trap for a device that was deleted from the cloud. Pin the
+ * uniform verdict so the special case cannot quietly come back. */
+static int test_gateway_not_exists_is_business_error(void)
+{
+    char body[64];
+    snprintf(body, sizeof(body), "{\"t\":%u}", (unsigned)time(NULL));
+
+    iot_atop_request_t req = { .api = "tuya.test.gateway.gone",
+                               .version = "1.0",
+                               .data = body };
+    iot_atop_response_t resp = {0};
+
+    int rt = iot_atop_call(&g_client, &req, &resp);
+    if (rt != OPRT_ATOP_BUSINESS_ERROR) {
+        printf("  returned %d, expected OPRT_ATOP_BUSINESS_ERROR\n", rt);
+        iot_atop_response_free(&g_client, &resp);
+        return -1;
+    }
+    if (strcmp(resp.error_code, "GATEWAY_NOT_EXISTS") != 0) {
+        printf("  error_code is \"%s\"\n", resp.error_code);
+        iot_atop_response_free(&g_client, &resp);
+        return -1;
+    }
+    printf("  uniform verdict: %s -> OPRT_ATOP_BUSINESS_ERROR\n", resp.error_code);
+    iot_atop_response_free(&g_client, &resp);
+    return 0;
+}
+
+/* The header promises "zeroed on entry" on EVERY path, including the argument
+ * guards -- a stale error_code surviving a rejected call must not masquerade
+ * as this call's cloud verdict. */
+static int test_response_zeroed_on_bad_request(void)
+{
+    iot_atop_response_t resp;
+    memset(&resp, 0xAA, sizeof(resp));   /* poison, as stack garbage would */
+
+    iot_atop_request_t req = { .api = "", .version = "1.0" };
+    int rt = iot_atop_call(&g_client, &req, &resp);
+    if (rt != OPRT_INVALID_PARAMETER) {
+        printf("  returned %d, expected OPRT_INVALID_PARAMETER\n", rt);
+        return -1;
+    }
+    if (resp.result != NULL || resp.error_code[0] != '\0' || resp.server_time != 0) {
+        printf("  response was not zeroed on the early-return path\n");
+        return -1;
+    }
+    iot_atop_response_free(&g_client, &resp);   /* must be safe, per the header */
+    return 0;
+}
+
+/* The whole point of the generic entry: the caller knows what its interface
+ * rejects on, so the cloud's own code has to reach it. */
+static int test_business_error_carries_error_code(void)
+{
+    char body[64];
+    snprintf(body, sizeof(body), "{\"t\":%u}", (unsigned)time(NULL));  /* no "metas" */
+
+    iot_atop_request_t req = { .api = "tuya.device.meta.save",
+                               .version = "1.0",
+                               .data = body };
+    iot_atop_response_t resp = {0};
+
+    int rt = iot_atop_call(&g_client, &req, &resp);
+    if (rt != OPRT_ATOP_BUSINESS_ERROR) {
+        printf("  returned %d, expected OPRT_ATOP_BUSINESS_ERROR\n", rt);
+        iot_atop_response_free(&g_client, &resp);
+        return -1;
+    }
+    if (strcmp(resp.error_code, "ILLEGAL_PARAM") != 0) {
+        printf("  error_code is \"%s\", expected \"ILLEGAL_PARAM\"\n", resp.error_code);
+        iot_atop_response_free(&g_client, &resp);
+        return -1;
+    }
+    if (resp.result != NULL) {
+        printf("  result should be NULL on rejection\n");
+        iot_atop_response_free(&g_client, &resp);
+        return -1;
+    }
+    printf("  rejected with %s (%s)\n", resp.error_code, resp.error_msg);
+    iot_atop_response_free(&g_client, &resp);
+    return 0;
+}
+
+/* An interface the SDK has never heard of still gets a usable answer -- this is
+ * what unblocks a business layer from waiting on an SDK release. */
+static int test_unknown_api_reaches_the_cloud(void)
+{
+    char body[64];
+    snprintf(body, sizeof(body), "{\"t\":%u}", (unsigned)time(NULL));
+
+    iot_atop_request_t req = { .api = "tuya.device.role.list.get",
+                               .version = "1.0",
+                               .data = body };
+    iot_atop_response_t resp = {0};
+
+    int rt = iot_atop_call(&g_client, &req, &resp);
+    if (rt != OPRT_ATOP_BUSINESS_ERROR) {
+        printf("  returned %d, expected OPRT_ATOP_BUSINESS_ERROR\n", rt);
+        iot_atop_response_free(&g_client, &resp);
+        return -1;
+    }
+    if (strcmp(resp.error_code, "UNKNOWN_API") != 0) {
+        printf("  error_code is \"%s\", expected \"UNKNOWN_API\"\n", resp.error_code);
+        iot_atop_response_free(&g_client, &resp);
+        return -1;
+    }
+    printf("  signed, encrypted and delivered; cloud replied %s\n", resp.error_code);
+    iot_atop_response_free(&g_client, &resp);
+    return 0;
+}
+
+/* A response larger than AGENTIC_KIT_RESPONSE_BUFFER_SIZE must fail loudly.
+ *
+ * This is the failure from CHANGELOG: a product whose schema came back at
+ * contentLength 6558 against a 4096 buffer, where coreHTTP returned
+ * HTTPInsufficientMemory and the caller reported a generic "communication
+ * error" — sending people to hunt the network for a buffer problem, after the
+ * server had already answered 200.
+ *
+ * Two things must hold now. The call still fails (the buffer really is too
+ * small), and coreHTTP says why, in its own words, through the log facade —
+ * which only happens while common/core_http_config.h is on its include path and
+ * HTTP_DO_NOT_USE_CUSTOM_CONFIG is not set. Nothing else in this suite notices
+ * if that wiring goes away, because every other case fits the buffer. */
+
+/* The capture itself lives in the compile-time sink (test_log.h): the
+ * window appends each dispatched line here -- va_copy/truncation
+ * discipline included -- and keeps stderr readable. */
+static char http_log_capture[8192];
+
+static int test_oversized_response_is_explained(void)
+{
+    char body[64];
+    snprintf(body, sizeof(body), "{\"t\":%u}", (unsigned)time(NULL));
+
+    iot_atop_request_t req = { .api = "tuya.test.huge.result",
+                               .version = "1.0",
+                               .data = body };
+    iot_atop_response_t resp = {0};
+
+    test_log_capture_begin(http_log_capture, sizeof http_log_capture);
+    int rt = iot_atop_call(&g_client, &req, &resp);
+    test_log_capture_end();
+
+    int result = 0;
+    if (rt == OPRT_OK) {
+        printf("  expected the oversized response to fail, got OPRT_OK\n");
+        result = -1;
+    }
+    /* coreHTTP's own account, routed via common/core_http_config.h. */
+    if (strstr(http_log_capture, "insufficient space") == NULL) {
+        printf("  coreHTTP never explained the failure --\n");
+        printf("  is HTTP_DO_NOT_USE_CUSTOM_CONFIG back, or common/ off its include path?\n");
+        result = -1;
+    }
+    if (result == 0) {
+        printf("  oversized response rejected, and coreHTTP said why\n");
+    }
+
+    iot_atop_response_free(&g_client, &resp);
+    return result;
+}
+
+static int test_response_free_is_repeatable(void)
+{
+    iot_atop_response_t resp = {0};
+
+    iot_atop_response_free(&g_client, &resp);   /* all-zero struct */
+
+    char body[128];
+    snprintf(body, sizeof(body),
+             "{\"metas\":{\"k\":\"v\"},\"t\":%u}", (unsigned)time(NULL));
+    iot_atop_request_t req = { .api = "tuya.device.meta.save",
+                               .version = "1.0",
+                               .data = body };
+    if (iot_atop_call(&g_client, &req, &resp) != OPRT_OK) {
+        printf("  setup call failed\n");
+        return -1;
+    }
+
+    iot_atop_response_free(&g_client, &resp);
+    if (resp.result != NULL || resp.error_code[0] != '\0' || resp.server_time != 0) {
+        printf("  free did not zero the struct\n");
+        return -1;
+    }
+    iot_atop_response_free(&g_client, &resp);   /* double free must be safe */
+    return 0;
+}
+
+static iot_binding_status_request_t binding_status_request(void)
+{
+    return (iot_binding_status_request_t){
+        .devid = TEST_DEVID,
+        .secret_key = TEST_SEC_KEY,
+        .host = MOCK_HOST,
+        .port = MOCK_PORT,
+        .cacert = g_cacert,
+    };
+}
+
+static int test_binding_status_requires_sdk_init(void)
+{
+    iot_binding_status_request_t request = binding_status_request();
+    iot_binding_status_t status = IOT_BINDING_STATUS_UNBOUND;
+    return iot_get_binding_status(&request, &status) == OPRT_UNINITIALIZED &&
+           status == IOT_BINDING_STATUS_UNBOUND ? 0 : -1;
+}
+
+static int test_binding_status_request_guards(void)
+{
+    iot_binding_status_request_t request = binding_status_request();
+    iot_binding_status_t status = IOT_BINDING_STATUS_UNBOUND;
+    if (iot_get_binding_status(NULL, &status) != OPRT_INVALID_PARAMETER ||
+        iot_get_binding_status(&request, NULL) != OPRT_INVALID_PARAMETER) {
+        return -1;
+    }
+    const char *bad_devid[] = {NULL, ""};
+    for (size_t i = 0; i < sizeof(bad_devid) / sizeof(bad_devid[0]); i++) {
+        request = binding_status_request();
+        request.devid = bad_devid[i];
+        if (iot_get_binding_status(&request, &status) != OPRT_INVALID_PARAMETER ||
+            status != IOT_BINDING_STATUS_UNBOUND) return -1;
+    }
+    const char *bad_key[] = {NULL, "", "short"};
+    for (size_t i = 0; i < sizeof(bad_key) / sizeof(bad_key[0]); i++) {
+        request = binding_status_request();
+        request.secret_key = bad_key[i];
+        if (iot_get_binding_status(&request, &status) != OPRT_INVALID_PARAMETER ||
+            status != IOT_BINDING_STATUS_UNBOUND) return -1;
+    }
+    return 0;
+}
+
+static int test_sync_check_guards(void)
+{
+    iot_binding_status_t status = IOT_BINDING_STATUS_UNBOUND;
+    if (iot_client_get_binding_status(NULL, &status) != OPRT_INVALID_PARAMETER ||
+        iot_client_get_binding_status(&g_client, NULL) != OPRT_INVALID_PARAMETER ||
+        status != IOT_BINDING_STATUS_UNBOUND) {
+        return -1;
+    }
+    iot_client_t bare = g_client;
+    bare.devid[0] = '\0';
+    return iot_client_get_binding_status(&bare, &status) == OPRT_UNINITIALIZED &&
+           status == IOT_BINDING_STATUS_UNBOUND ? 0 : -1;
+}
+
+static int test_sync_check_statuses(void)
+{
+    const struct {
+        const char *wire;
+        iot_binding_status_t expected;
+    } cases[] = {
+        {"enable", IOT_BINDING_STATUS_BOUND},
+        {"reset", IOT_BINDING_STATUS_UNBOUND},
+        {"reset_factory", IOT_BINDING_STATUS_FACTORY_RESET},
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        if (set_sync_status(cases[i].wire) != 0) return -1;
+        iot_binding_status_request_t request = binding_status_request();
+        iot_binding_status_t direct_status = IOT_BINDING_STATUS_BOUND;
+        int direct_rt = iot_get_binding_status(&request, &direct_status);
+        if (direct_rt != OPRT_OK || direct_status != cases[i].expected) {
+            printf("  credential-only query %s: returned %d, value %d\n",
+                   cases[i].wire, direct_rt, direct_status);
+            return -1;
+        }
+        iot_binding_status_t status = IOT_BINDING_STATUS_BOUND;
+        int rt = iot_client_get_binding_status(&g_client, &status);
+        if (rt != OPRT_OK || status != cases[i].expected) {
+            printf("  status %s: returned %d, value %d\n", cases[i].wire, rt, status);
+            return -1;
+        }
+    }
+    return 0;
+}
+
+static int test_sync_check_rejects_bad_results(void)
+{
+    const char *bad[] = {"__missing__", "__number__", "unknown"};
+    for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+        if (set_sync_status(bad[i]) != 0) return -1;
+        iot_binding_status_request_t request = binding_status_request();
+        iot_binding_status_t direct_status = IOT_BINDING_STATUS_FACTORY_RESET;
+        int direct_rt = iot_get_binding_status(&request, &direct_status);
+        if (direct_rt != OPRT_INVALID_RESULT || direct_status != IOT_BINDING_STATUS_FACTORY_RESET) {
+            printf("  credential-only bad result %s: returned %d, value %d\n",
+                   bad[i], direct_rt, direct_status);
+            return -1;
+        }
+        iot_binding_status_t status = IOT_BINDING_STATUS_FACTORY_RESET;
+        int rt = iot_client_get_binding_status(&g_client, &status);
+        if (rt != OPRT_INVALID_RESULT || status != IOT_BINDING_STATUS_FACTORY_RESET) {
+            printf("  bad result %s: returned %d, value %d\n", bad[i], rt, status);
+            return -1;
+        }
+    }
+    if (set_sync_status("__reject__") != 0) return -1;
+    iot_binding_status_request_t request = binding_status_request();
+    iot_binding_status_t direct_status = IOT_BINDING_STATUS_FACTORY_RESET;
+    int direct_rt = iot_get_binding_status(&request, &direct_status);
+    if (direct_rt != OPRT_ATOP_BUSINESS_ERROR || direct_status != IOT_BINDING_STATUS_FACTORY_RESET) {
+        return -1;
+    }
+    iot_binding_status_t status = IOT_BINDING_STATUS_FACTORY_RESET;
+    int rt = iot_client_get_binding_status(&g_client, &status);
+    return rt == OPRT_ATOP_BUSINESS_ERROR && status == IOT_BINDING_STATUS_FACTORY_RESET ? 0 : -1;
+}
+
+static int test_binding_status_after_reset_destroys_client(void)
+{
+    const pal_t *pal = get_default_pal();
+    iot_client_t *client = pal->malloc(sizeof(*client));
+    if (client == NULL) return -1;
+    *client = g_client;  /* no MQTT/DP/schema resources in the stack fixture */
+    int rt = iot_client_reset(client, IOT_RESET_UNBIND_ONLY, NULL, 0);
+    if (rt != OPRT_OK) {
+        iot_client_deinit(client);
+        return -1;
+    }
+    /* client was freed by reset. The saved credentials alone must suffice. */
+    if (set_sync_status("reset") != 0) return -1;
+    iot_binding_status_request_t request = binding_status_request();
+    iot_binding_status_t status = IOT_BINDING_STATUS_BOUND;
+    rt = iot_get_binding_status(&request, &status);
+    return rt == OPRT_OK && status == IOT_BINDING_STATUS_UNBOUND ? 0 : -1;
+}
+
+static uint64_t fixed_wall_ms(void)
+{
+    return 1600000000123ULL;
+}
+
+static int test_signing_uses_pal_wall_clock(void)
+{
+    pal_t pal = *g_client.pal;
+    pal.wal_clock_time = fixed_wall_ms;
+    iot_client_t client = g_client;
+    client.pal = &pal;
+    iot_atop_request_t request = {
+        .api = "tuya.test.echo.timestamp", .version = "1.0", .data = "{}"
+    };
+    iot_atop_response_t response = {0};
+    int rc = iot_atop_call(&client, &request, &response);
+    int result = -1;
+    if (rc == OPRT_OK && response.result) {
+        cJSON *json = cJSON_Parse(response.result);
+        const cJSON *timestamp = cJSON_GetObjectItem(json, "timestamp");
+        const cJSON *verified = cJSON_GetObjectItem(json, "signature_verified");
+        if (cJSON_IsString(timestamp) &&
+            strcmp(timestamp->valuestring, "1600000000") == 0 &&
+            cJSON_IsTrue(verified)) result = 0;
+        cJSON_Delete(json);
+    }
+    iot_atop_response_free(&client, &response);
+    return result;
+}
+
+static uint64_t unavailable_wall_ms(void)
+{
+    return 0;
+}
+
+/* t=0 (PAL reports UTC unavailable) still signs and reaches the peer; the
+ * warning is the only device-visible trace of the misconfiguration. */
+static int test_signing_warns_when_utc_unavailable(void)
+{
+    pal_t pal = *g_client.pal;
+    pal.wal_clock_time = unavailable_wall_ms;
+    iot_client_t client = g_client;
+    client.pal = &pal;
+    iot_atop_request_t request = {
+        .api = "tuya.test.echo.timestamp", .version = "1.0", .data = "{}"
+    };
+    iot_atop_response_t response = {0};
+    test_log_capture_begin(http_log_capture, sizeof http_log_capture);
+    int rc = iot_atop_call(&client, &request, &response);
+    test_log_capture_end();
+
+    int result = -1;
+    if (rc == OPRT_OK && response.result) {
+        cJSON *json = cJSON_Parse(response.result);
+        const cJSON *timestamp = cJSON_GetObjectItem(json, "timestamp");
+        if (cJSON_IsString(timestamp) && strcmp(timestamp->valuestring, "0") == 0 &&
+            strstr(http_log_capture, "UTC unavailable") != NULL) result = 0;
+        cJSON_Delete(json);
+    }
+    iot_atop_response_free(&client, &response);
+    return result;
+}
+
+static int test_peer_rejects_invalid_signature(void)
+{
+    static const char base[] =
+        "/d.json?a=tuya.test.echo.timestamp&devId=" TEST_DEVID "&et=3&t=";
+    const char *cases[] = {
+        "1600000000&v=1.0",  /* Missing sign. */
+        "1600000000&v=1.0&sign=00000000000000000000000000000000",
+        /* The signature is valid for t=1600000000, not this altered t. */
+        "1600000001&v=1.0&sign=06962ff5a62cd85b7ce8d1577f82dec2",
+    };
+    static const uint8_t body[] = "data=00";
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        char path[256];
+        snprintf(path, sizeof(path), "%s%s", base, cases[i]);
+        http_client_request_t request = {
+            .cacert = g_cacert, .host = MOCK_HOST, .port = MOCK_PORT,
+            .method = "POST", .path = path, .body = body,
+            .body_length = sizeof(body) - 1, .timeout_ms = 3000,
+            .pal = g_client.pal,
+        };
+        http_client_response_t response = {0};
+        http_client_status_t rc = http_client_request(&request, &response);
+        int rejected = rc == HTTP_CLIENT_SUCCESS && response.status_code == 403 &&
+                       response.body && strstr((const char *)response.body,
+                                               "Invalid ATOP signature");
+        http_client_free(g_client.pal, &response);
+        if (!rejected) {
+            printf("  invalid signature case %zu was not rejected by the peer\n", i);
+            return -1;
+        }
+    }
+    return 0;
+}
+
+int main(void)
+{
+    printf("========== ATOP Generic Call Test Suite ==========\n");
+
+    RUN_TEST(test_binding_status_requires_sdk_init);
+
+    const pal_t *pal = get_default_pal();
+    iot_init(pal);
+
+    g_cacert = load_file(pal, TEST_CONFIG_DIR "/root_cert.pem");
+    if (!g_cacert) {
+        fprintf(stderr, "Failed to load CA certificate from %s\n",
+                TEST_CONFIG_DIR "/root_cert.pem");
+        return 1;
+    }
+
+    /* A stack client is enough: iot_atop_call() only reads credentials, the
+     * resolved ATOP endpoint, and the TLS settings. */
+    memset(&g_client, 0, sizeof(g_client));
+    g_client.pal = pal;
+    snprintf(g_client.devid, sizeof(g_client.devid), "%s", TEST_DEVID);
+    snprintf(g_client.secret_key, sizeof(g_client.secret_key), "%s", TEST_SEC_KEY);
+    snprintf(g_client.https_url, sizeof(g_client.https_url),
+             "https://%s:%u", MOCK_HOST, MOCK_PORT);
+    g_client.cacert = g_cacert;
+
+    snprintf(g_sync_status_file, sizeof(g_sync_status_file),
+             "/tmp/atop_sync_status_%ld", (long)getpid());
+    if (set_sync_status("enable") != 0) {
+        pal->free(g_cacert);
+        return 1;
+    }
+
+    if (start_mock_server() != 0) {
+        fprintf(stderr, "Failed to start mock server\n");
+        pal->free(g_cacert);
+        unlink(g_sync_status_file);
+        return 1;
+    }
+
+    /* Guards — no network needed */
+    RUN_TEST(test_null_params);
+    RUN_TEST(test_api_and_version_required);
+    RUN_TEST(test_requires_device_credentials);
+    RUN_TEST(test_body_must_be_json_object);
+    RUN_TEST(test_binding_status_request_guards);
+
+    /* Round trips */
+    RUN_TEST(test_signing_uses_pal_wall_clock);
+    RUN_TEST(test_signing_warns_when_utc_unavailable);
+    RUN_TEST(test_peer_rejects_invalid_signature);
+    RUN_TEST(test_call_returns_result_json);
+    RUN_TEST(test_call_returns_json_array);
+    RUN_TEST(test_null_body_defaults_to_empty_object);
+    RUN_TEST(test_business_error_carries_error_code);
+    RUN_TEST(test_unknown_api_reaches_the_cloud);
+    RUN_TEST(test_null_result_stays_null);
+    RUN_TEST(test_gateway_not_exists_is_business_error);
+    RUN_TEST(test_response_zeroed_on_bad_request);
+    RUN_TEST(test_oversized_response_is_explained);
+    RUN_TEST(test_response_free_is_repeatable);
+    RUN_TEST(test_sync_check_guards);
+    RUN_TEST(test_sync_check_statuses);
+    RUN_TEST(test_sync_check_rejects_bad_results);
+    RUN_TEST(test_binding_status_after_reset_destroys_client);
+
+    stop_mock_server();
+    pal->free(g_cacert);
+    unlink(g_sync_status_file);
+
+    printf("\n========== Results: %d/%d passed ==========\n", tests_passed, tests_run);
+    return (tests_passed == tests_run) ? 0 : 1;
+}

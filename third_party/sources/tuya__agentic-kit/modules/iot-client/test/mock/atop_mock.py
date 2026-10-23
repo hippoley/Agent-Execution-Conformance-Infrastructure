@@ -1,0 +1,947 @@
+#!/usr/bin/env python3
+"""
+ATOP Mock Server for ESP32 Testing
+
+Simulates Tuya ATOP cloud service for testing device activation and AI configuration.
+
+ATOP Protocol:
+- HTTP POST to /d.json
+- URL parameters: a (API), devId, et, t (timestamp), uuid, v (version), sign (MD5)
+- Request body: data=HEX_ENCODED_ENCRYPTED_JSON (AES-128-GCM encrypted)
+- Response body: JSON with base64-encoded encrypted data in "result" field
+- Encryption key: authkey (first 16 bytes for AES-128-GCM) or sec_key for AI config
+
+Usage:
+    # Start mock server (default: https://127.0.0.1:443 for HTTPS, http://127.0.0.1:80 for HTTP)
+    cd test/mock
+    python3 atop_mock.py
+    
+    # Configure client to use mock server
+    # In test/config/clink.conf, set:
+    #   host=127.0.0.1
+    #   port=443  # HTTPS (use 80 for HTTP)
+    
+    # For HTTPS (optional):
+    #   export ATOP_MOCK_USE_SSL=1
+    #   export ATOP_MOCK_CERT=cert.pem
+    #   export ATOP_MOCK_KEY=key.pem
+    #   python3 atop_mock.py
+
+Supported APIs:
+    - thing.device.opensdk.active: Device activation
+    - thing.ai.agent.token.get: AI token retrieval
+    - tuya.device.qrcode.info.get: QR code info retrieval
+    - tuya.device.meta.save: Device metadata save
+    - tuya.device.info.sync: Device binding status query
+"""
+
+import json
+import socket
+import threading
+import ssl
+import os
+import sys
+import hashlib
+import urllib.parse
+import time
+import base64
+from http.server import HTTPServer, BaseHTTPRequestHandler
+
+
+class ReusableHTTPServer(HTTPServer):
+    allow_reuse_address = True
+    # Larger listen backlog: this server is single-threaded and does the TLS
+    # handshake inline in the accept loop, so under load (CI) the default
+    # backlog of 5 can saturate and a client connect() times out. A deep
+    # backlog absorbs transient accept-loop stalls.
+    request_queue_size = 128
+
+# Try to import from Cryptodome first (pycryptodome), then fall back to Crypto (pycrypto)
+try:
+    from Cryptodome.Cipher import AES
+    from Cryptodome.Random import get_random_bytes
+except ImportError:
+    from Crypto.Cipher import AES
+    from Crypto.Random import get_random_bytes
+
+# AES-GCM constants
+AES_GCM128_NONCE_LEN = 12
+AES_GCM128_TAG_LEN = 16
+AES_GCM128_KEY_LEN = 16
+
+
+def load_config(filename=None):
+    """Load configuration from file (path relative to this script)"""
+    if filename is None:
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        filename = os.path.join(script_dir, '..', 'config', 'atop.conf')
+    config = {
+        'host': '127.0.0.1',
+        'port': 8443,  # HTTPS default port (use 80 for HTTP)
+        'uuid': None,
+        'authkey': None,
+        'device_id': None,
+        'sec_key': None
+    }
+
+    if not os.path.exists(filename):
+        print(f"⚠️  Configuration file not found: {filename}", file=sys.stderr)
+        return config
+
+    with open(filename, 'r') as f:
+        for line in f:
+            line = line.strip()
+            # Skip comments and empty lines
+            if not line or line.startswith('#'):
+                continue
+
+            # Parse key=value
+            if '=' not in line:
+                continue
+
+            key, value = line.split('=', 1)
+            key = key.strip()
+            value = value.strip()
+
+            if key == 'host':
+                config['host'] = value
+            elif key == 'port':
+                try:
+                    config['port'] = int(value)
+                except ValueError:
+                    pass
+            elif key == 'uuid':
+                config['uuid'] = value
+            elif key == 'authkey':
+                config['authkey'] = value
+            elif key == 'device_id':
+                config['device_id'] = value
+            elif key == 'sec_key':
+                config['sec_key'] = value
+
+    return config
+
+
+def md5_sign(params, key):
+    """Generate MD5 signature for URL parameters
+    
+    Format: key1=value1||key2=value2||...||key
+    """
+    # Sort parameters by key for consistent signing
+    sorted_params = sorted(params.items())
+    
+    # Build signature string
+    sign_str = ''
+    for k, v in sorted_params:
+        sign_str += f'{k}={v}||'
+    sign_str += key
+    
+    # Calculate MD5
+    md5_hash = hashlib.md5(sign_str.encode('utf-8')).hexdigest()
+    return md5_hash.lower()
+
+
+def verify_signature(url_params, key):
+    """Verify URL parameter signature"""
+    if 'sign' not in url_params:
+        return False
+    
+    sign = url_params.pop('sign')
+    
+    # Generate expected signature
+    expected_sign = md5_sign(url_params, key)
+    
+    return sign.lower() == expected_sign.lower()
+
+
+def aes_gcm_decrypt(key, encrypted_data_hex):
+    """Decrypt AES-128-GCM encrypted data (hex encoded)"""
+    try:
+        # Convert hex string to bytes
+        encrypted_data = bytes.fromhex(encrypted_data_hex)
+        
+        if len(encrypted_data) < AES_GCM128_NONCE_LEN + AES_GCM128_TAG_LEN:
+            return None
+        
+        # Extract nonce, ciphertext, and tag
+        nonce = encrypted_data[:AES_GCM128_NONCE_LEN]
+        ciphertext = encrypted_data[AES_GCM128_NONCE_LEN:-AES_GCM128_TAG_LEN]
+        tag = encrypted_data[-AES_GCM128_TAG_LEN:]
+        
+        # Ensure key is 16 bytes
+        if len(key) > AES_GCM128_KEY_LEN:
+            key = key[:AES_GCM128_KEY_LEN]
+        elif len(key) < AES_GCM128_KEY_LEN:
+            key = key.ljust(AES_GCM128_KEY_LEN, b'\0')
+        
+        # Decrypt
+        cipher = AES.new(key, AES.MODE_GCM, nonce=nonce)
+        plaintext = cipher.decrypt_and_verify(ciphertext, tag)
+        
+        return plaintext.decode('utf-8')
+    except Exception as e:
+        print(f"❌ Decryption error: {e}", file=sys.stderr)
+        return None
+
+
+def aes_gcm_encrypt(key, plaintext):
+    """Encrypt data using AES-128-GCM"""
+    try:
+        # Ensure key is 16 bytes
+        if len(key) > AES_GCM128_KEY_LEN:
+            key = key[:AES_GCM128_KEY_LEN]
+        elif len(key) < AES_GCM128_KEY_LEN:
+            key = key.ljust(AES_GCM128_KEY_LEN, b'\0')
+        
+        # Generate random nonce
+        nonce = get_random_bytes(AES_GCM128_NONCE_LEN)
+        
+        # Encrypt
+        cipher = AES.new(key, AES.MODE_GCM, nonce=nonce)
+        ciphertext, tag = cipher.encrypt_and_digest(plaintext.encode('utf-8'))
+        
+        # Combine nonce + ciphertext + tag
+        encrypted = nonce + ciphertext + tag
+        
+        # Return as hex string
+        return encrypted.hex().upper()
+    except Exception as e:
+        print(f"❌ Encryption error: {e}", file=sys.stderr)
+        return None
+
+
+def record_request(api):
+    """Append the API name to the file named by ATOP_MOCK_RECORD_FILE, if set.
+
+    Lets a test assert which reports were attempted (and, just as important,
+    which were NOT) by reading the file, instead of reaching into this
+    process. Recorded BEFORE decryption: an attempt whose crypto fails still
+    counts as an attempt, which is exactly what a "did the call happen" test
+    wants to observe.
+    """
+    path = os.getenv('ATOP_MOCK_RECORD_FILE', '')
+    if not path:
+        return
+    try:
+        with open(path, 'a') as f:
+            f.write(api + '\n')
+    except OSError as e:
+        print(f"⚠️  record_request failed: {e}", file=sys.stderr)
+
+
+def handle_activate_request(request_data, config):
+    """Handle device activation request"""
+    try:
+        request_json = json.loads(request_data)
+        
+        # Extract request parameters
+        token = request_json.get('token', '')
+        sw_ver = request_json.get('swVer', '')
+        product_key = request_json.get('productKey', '')
+        pv = request_json.get('pv', '')
+        bv = request_json.get('bv', '')
+        
+        # Generate mock response
+        # In real scenario, this would validate credentials and generate device ID
+        device_id = config.get('device_id') or f"mock_device_{int(time.time())}"
+        sec_key = config.get('sec_key') or "mock_sec_key_1234567890abcdef"
+        
+        response = {
+            "success": True,
+            "t": int(time.time()),
+            "result": {
+                "devId": device_id,
+                "secKey": sec_key,
+                "name": "Mock Device",
+                "productKey": product_key or "mock_product_key",
+                "localKey": "1234567890abcdef",
+                "schemaId": "mock_schema_id",
+                "schema": [],
+                "timezoneId": "Asia/Shanghai",
+                "ownerId": "mock_owner_id",
+                "nodeId": "mock_node_id",
+                "icon": "",
+                "ip": "192.168.1.100",
+                "mac": "AA:BB:CC:DD:EE:FF",
+                "uuid": config.get('uuid', 'mock_uuid'),
+                "pv": pv or "2.0",
+                "bv": bv or "1.0",
+                "verSw": sw_ver or "1.0.0",
+                "cdVer": "1.0.0",
+                "cadVer": "1.0.3"
+            }
+        }
+        
+        return json.dumps(response, separators=(',', ':'))
+    except Exception as e:
+        print(f"❌ Error handling activate request: {e}", file=sys.stderr)
+        response = {
+            "success": False,
+            "t": int(time.time()),
+            "errorCode": "ACTIVATE_FAILED",
+            "errorMsg": str(e)
+        }
+        return json.dumps(response, separators=(',', ':'))
+
+
+def handle_ai_token_request(request_data, config):
+    """Handle AI token request"""
+    try:
+        request_json = json.loads(request_data)
+
+        agent_code = request_json.get('agentCode', '')
+
+        # Test-only: an agentCode of "reject:<CODE>" makes the cloud reject the
+        # request with that errorCode, so the caller's handling of the real
+        # rejections (unbound device, unsigned privacy agreement, no agent
+        # configured) can be tested. Real agent codes never contain a colon.
+        if agent_code.startswith('reject:'):
+            return json.dumps({
+                "success": False,
+                "t": int(time.time()),
+                "errorCode": agent_code[len('reject:'):],
+                "errorMsg": "mock rejection"
+            }, separators=(',', ':'))
+
+        device_id = config.get('device_id', 'device')
+        response = {
+            "success": True,
+            "t": int(time.time()),
+            "result": {
+                "connect_conf": {
+                    "derived_iv": "mock_iv_12345678",
+                    "tcpport": 8884,
+                    "udpport_backup": 443,
+                    "credential": "mock_credential_abcdef",
+                    "derived_client_id": f"mock_client_{device_id}",
+                    "hosts": ["127.0.0.1"],
+                    "expire": int(time.time()) + 86400,
+                    "domains": ["rtc-1-cn.mock.com"],
+                    "derived_algorithm": "AES-CBC",
+                    "udpport": 10006,
+                    "username": f"mock_user_{device_id}"
+                },
+                "session_conf": {
+                    "agentToken": f"mock_token_{agent_code}",
+                    "bizConfig": {
+                        "bizCode": 65537,
+                        "revData": ["text", "audio", "image", "video", "file"],
+                        "sendData": ["text", "audio", "image", "video", "file"]
+                    }
+                }
+            }
+        }
+
+        return json.dumps(response, separators=(',', ':'))
+    except Exception as e:
+        print(f"❌ Error handling AI token request: {e}", file=sys.stderr)
+        response = {
+            "success": False,
+            "t": int(time.time()),
+            "errorCode": "AI_TOKEN_FAILED",
+            "errorMsg": str(e)
+        }
+        return json.dumps(response, separators=(',', ':'))
+
+
+def handle_device_meta_save_request(request_data, config):
+    """Handle device meta save request (tuya.device.meta.save)"""
+    try:
+        request_json = json.loads(request_data)
+
+        metas = request_json.get('metas', '')
+        if not metas:
+            return json.dumps({
+                "success": False,
+                "t": int(time.time()),
+                "errorCode": "ILLEGAL_PARAM",
+                "errorMsg": "missing metas"
+            }, separators=(',', ':'))
+
+        response = {
+            "success": True,
+            "t": int(time.time()),
+            "result": True
+        }
+
+        return json.dumps(response, separators=(',', ':'))
+    except Exception as e:
+        print(f"❌ Error handling device meta save request: {e}", file=sys.stderr)
+        response = {
+            "success": False,
+            "t": int(time.time()),
+            "errorCode": "META_SAVE_FAILED",
+            "errorMsg": str(e)
+        }
+        return json.dumps(response, separators=(',', ':'))
+
+
+def handle_device_info_sync(request_data, url_params):
+    """Return a selectable binding status for named-wrapper integration tests."""
+    try:
+        body = json.loads(request_data)
+    except (TypeError, ValueError):
+        body = None
+    if (url_params.get('v') != '1.0' or not isinstance(body, dict) or
+            not isinstance(body.get('t'), int)):
+        return json.dumps({"success": False, "t": int(time.time()),
+                           "errorCode": "ILLEGAL_PARAM", "errorMsg": "invalid sync request"})
+
+    status = 'enable'
+    status_file = os.getenv('ATOP_MOCK_SYNC_STATUS_FILE')
+    if status_file:
+        with open(status_file, 'r') as f:
+            status = f.read().strip()
+    if status == '__reject__':
+        return json.dumps({"success": False, "t": int(time.time()),
+                           "errorCode": "GATEWAY_NOT_EXISTS", "errorMsg": "device removed"})
+    result = {} if status == '__missing__' else {"status": 1 if status == '__number__' else status}
+    return json.dumps({"success": True, "t": int(time.time()), "result": result},
+                      separators=(',', ':'))
+
+
+def handle_device_reset(request_data, config, url_params=None):
+    """Handle device reset / unbind (tuya.device.reset).
+
+    Success mirrors the interface doc exactly: an EMPTY result object. That is
+    the point of this handler -- a wrapper that insisted on a non-empty result
+    would reject a real success.
+
+    A devId containing 'busy' answers with the doc's own retryable rejection,
+    so a test can reach the "failure must leave the client intact" path. The
+    mock decrypts with sec_key regardless of which devId is presented, so a
+    test only has to vary the devid string.
+    """
+    try:
+        body = json.loads(request_data)
+    except Exception as e:
+        print(f"\u274c device reset: unparsable body: {e}", file=sys.stderr)
+        return json.dumps({
+            "success": False,
+            "t": int(time.time()),
+            "errorCode": "ILLEGAL_PARAM",
+            "errorMsg": str(e)
+        }, separators=(',', ':'))
+
+    # resetFactory is required, and both values are legal: false unbinds, true
+    # also wipes the device's cloud-side data. Pin its PRESENCE (omitting it
+    # would come back from the real cloud as an opaque rejection -- the same
+    # class of late failure as a wrong version below) and echo it back, so a
+    # test can prove the caller's choice actually reached the wire.
+    reset_factory = body.get('resetFactory')
+    if not isinstance(reset_factory, bool):
+        print(f"\u274c device reset: resetFactory missing or not a bool: {body!r}",
+              file=sys.stderr)
+        return json.dumps({
+            "success": False,
+            "t": int(time.time()),
+            "errorCode": "ILLEGAL_PARAM",
+            "errorMsg": "tuya.device.reset expects a boolean resetFactory"
+        }, separators=(',', ':'))
+    print(f"   resetFactory: {reset_factory}")
+
+    # The caller's scope has to reach the wire, and an empty-result response
+    # cannot show which one arrived. Encode the expectation in the devId
+    # instead: a devId containing 'factory' must present resetFactory=true, any
+    # other must present false. A test that sends the wrong scope is then
+    # rejected here rather than passing silently -- and the success response
+    # keeps the empty result the real interface returns.
+    devid_for_scope = (url_params or {}).get('devId', '')
+    expect_factory = 'factory' in devid_for_scope
+    if reset_factory is not expect_factory:
+        print(f"\u274c device reset: devId {devid_for_scope!r} expects "
+              f"resetFactory={expect_factory}, got {reset_factory}", file=sys.stderr)
+        return json.dumps({
+            "success": False,
+            "t": int(time.time()),
+            "errorCode": "ILLEGAL_PARAM",
+            "errorMsg": f"expected resetFactory={str(expect_factory).lower()}"
+        }, separators=(',', ':'))
+
+    # Pin the interface version. It is the one thing about this call that a
+    # local test cannot otherwise check: on a real device a wrong version comes
+    # back as an opaque cloud rejection, which reads like a network fault.
+    version = (url_params or {}).get('v', '')
+    if version != '5.0':
+        print(f"\u274c device reset: wrong interface version {version!r} (expected '5.0')",
+              file=sys.stderr)
+        return json.dumps({
+            "success": False,
+            "t": int(time.time()),
+            "errorCode": "UNKNOWN_API_VERSION",
+            "errorMsg": f"tuya.device.reset expects v=5.0, got {version!r}"
+        }, separators=(',', ':'))
+
+    devid = (url_params or {}).get('devId', '')
+    if 'busy' in devid:
+        return json.dumps({
+            "success": False,
+            "t": int(time.time()),
+            "errorCode": "REMOTE_API_RUN_UNKNOW_FAILED",
+            "errorMsg": "The server is busy, please try again later"
+        }, separators=(',', ':'))
+
+    return json.dumps({
+        "success": True,
+        "t": int(time.time()),
+        "result": {}
+    }, separators=(',', ':'))
+
+
+def handle_schema_newest_get(request_data, config):
+    """Handle newest-schema query (tuya.device.schema.newest.get).
+
+    Returns an empty schema ([] = no update) when the request 'version' equals
+    the sentinel "NOUPDATE"; otherwise returns a fresh schema array (update).
+    """
+    try:
+        request_json = json.loads(request_data)
+        version = request_json.get('version', '')
+
+        if version == 'NOUPDATE':
+            result = []
+        else:
+            result = [
+                {"id": 1, "type": "bool",   "mode": "rw"},
+                {"id": 2, "type": "value",  "mode": "rw", "property": {"min": 0, "max": 1000}},
+                {"id": 3, "type": "enum",   "mode": "rw", "property": {"range": ["white", "warm", "cold"]}},
+                {"id": 7, "type": "string", "mode": "rw", "property": {"maxlen": 32}}
+            ]
+
+        response = {
+            "success": True,
+            "t": int(time.time()),
+            "result": result
+        }
+        return json.dumps(response, separators=(',', ':'))
+    except Exception as e:
+        print(f"❌ Error handling schema newest get request: {e}", file=sys.stderr)
+        return json.dumps({
+            "success": False,
+            "t": int(time.time()),
+            "errorCode": "SCHEMA_NEWEST_FAILED",
+            "errorMsg": str(e)
+        }, separators=(',', ':'))
+
+
+def handle_upgrade_get(request_data, config):
+    """Handle firmware upgrade check (tuya.device.upgrade.get).
+
+    Returns firmware upgrade info when the request type is 0 (main MCU);
+    returns an empty result (no upgrade) for other types.
+    """
+    try:
+        request_json = json.loads(request_data)
+        fw_type = request_json.get('type', 0)
+
+        if fw_type != 0:
+            result = {}
+        else:
+            result = {
+                "type": 0,
+                "version": "2.0.0",
+                "cdnUrl": "https://images.example.com/firmware/v2.0.0.bin",
+                "httpsUrl": "https://fireware.example.com:1443/firmware/v2.0.0.bin",
+                "size": "1024000",
+                "md5": "aabbccdd11223344aabbccdd11223344",
+                "hmac": "eeff00112233445566778899aabbccddeeff00112233445566778899aabbccdd"
+            }
+
+        response = {
+            "success": True,
+            "t": int(time.time()),
+            "result": result
+        }
+        return json.dumps(response, separators=(',', ':'))
+    except Exception as e:
+        print(f"❌ Error handling upgrade get request: {e}", file=sys.stderr)
+        return json.dumps({
+            "success": False,
+            "t": int(time.time()),
+            "errorCode": "UPGRADE_GET_FAILED",
+            "errorMsg": str(e)
+        }, separators=(',', ':'))
+
+
+def handle_version_update(request_data, config):
+    """Handle firmware version update (tuya.device.versions.update)."""
+    try:
+        request_json = json.loads(request_data)
+        versions = request_json.get('versions', '')
+
+        if not versions:
+            return json.dumps({
+                "success": False,
+                "t": int(time.time()),
+                "errorCode": "ILLEGAL_PARAM",
+                "errorMsg": "missing versions"
+            }, separators=(',', ':'))
+
+        response = {
+            "success": True,
+            "t": int(time.time()),
+            "result": True
+        }
+        return json.dumps(response, separators=(',', ':'))
+    except Exception as e:
+        print(f"❌ Error handling version update request: {e}", file=sys.stderr)
+        return json.dumps({
+            "success": False,
+            "t": int(time.time()),
+            "errorCode": "VERSION_UPDATE_FAILED",
+            "errorMsg": str(e)
+        }, separators=(',', ':'))
+
+
+def handle_upgrade_status_update(request_data, config):
+    """Handle upgrade status update (tuya.device.upgrade.status.update)."""
+    try:
+        request_json = json.loads(request_data)
+        fw_type = request_json.get('type', 0)
+        status = request_json.get('upgradeStatus', 0)
+
+        response = {
+            "success": True,
+            "t": int(time.time()),
+            "result": True
+        }
+        return json.dumps(response, separators=(',', ':'))
+    except Exception as e:
+        print(f"❌ Error handling upgrade status update request: {e}", file=sys.stderr)
+        return json.dumps({
+            "success": False,
+            "t": int(time.time()),
+            "errorCode": "STATUS_UPDATE_FAILED",
+            "errorMsg": str(e)
+        }, separators=(',', ':'))
+
+
+def handle_qrcode_info_request(request_data, config, url_params=None):
+    """Handle QR code info request (tuya.device.qrcode.info.get)"""
+    try:
+        url_params = url_params or {}
+        t = url_params.get('t', '')
+
+        if not t:
+            return json.dumps({
+                "success": False,
+                "t": int(time.time()),
+                "errorCode": "SING_VALIDATE_FALED",
+                "errorMsg": "missing t"
+            }, separators=(',', ':'))
+
+        request_json = json.loads(request_data)
+
+        if 't' not in request_json:
+            return json.dumps({
+                "success": False,
+                "t": int(time.time()),
+                "errorCode": "ILLEGAL_PARAM",
+                "errorMsg": "missing t in request body"
+            }, separators=(',', ':'))
+
+        app_id = request_json.get('appId', '')
+        qr_type = request_json.get('type', 0)
+
+        response = {
+            "success": True,
+            "t": int(time.time()),
+            "result": {"shortUrl": f"https://smartapp.tuya.com/s/p?p=mock_qrcode_{app_id}_{qr_type}"}
+        }
+
+        return json.dumps(response, separators=(',', ':'))
+    except Exception as e:
+        print(f"❌ Error handling qrcode info request: {e}", file=sys.stderr)
+        response = {
+            "success": False,
+            "t": int(time.time()),
+            "errorCode": "QRCODE_INFO_FAILED",
+            "errorMsg": str(e)
+        }
+        return json.dumps(response, separators=(',', ':'))
+
+
+class ATOPMockHandler(BaseHTTPRequestHandler):
+    """HTTP request handler for ATOP mock server"""
+    
+    def __init__(self, *args, config=None, **kwargs):
+        self.config = config or {}
+        super().__init__(*args, **kwargs)
+    
+    def log_message(self, format, *args):
+        """Override to use custom logging"""
+        print(f"📡 {self.address_string()} - {format % args}")
+    
+    def do_POST(self):
+        """Handle POST requests"""
+        try:
+            # Parse URL and query parameters
+            parsed_path = urllib.parse.urlparse(self.path)
+            if parsed_path.path != '/d.json':
+                self.send_error(404, "Not Found")
+                return
+            
+            query_params = urllib.parse.parse_qs(parsed_path.query)
+            # Convert list values to single values
+            url_params = {k: v[0] if isinstance(v, list) and len(v) > 0 else v 
+                         for k, v in query_params.items()}
+            
+            # Extract API name
+            api = url_params.get('a', '')
+            uuid = url_params.get('uuid', '')
+            devid = url_params.get('devId', '')
+            
+            print(f"📥 Received ATOP request:")
+            print(f"   API: {api}")
+            print(f"   UUID: {uuid}")
+            print(f"   Device ID: {devid}")
+
+            record_request(api)
+            
+            # Determine encryption key
+            # For activation: use authkey from config
+            # For AI config: use sec_key from config (or devid's key)
+            # Key selection follows the credential the device signs with, keyed
+            # purely off the identity param in the URL: a devId means the caller
+            # is an activated device signing with sec_key; otherwise (uuid-only,
+            # i.e. pre-activation) it signs with authkey. No per-API list -- that
+            # is what lets the generic entry point reach interfaces the mock has
+            # no handler for, including ones the named wrappers also cover.
+            if devid:
+                key = self.config.get('sec_key', '').encode('utf-8')
+            else:
+                key = self.config.get('authkey', '').encode('utf-8')
+            
+            # Read request body
+            content_length = int(self.headers.get('Content-Length', 0))
+            body = self.rfile.read(content_length).decode('utf-8')
+
+            # The clock regression endpoint validates the actual wire signature,
+            # including t, independently of the C SDK. Reject before decrypting
+            # so malformed signatures cannot pass as decryption errors.
+            if api == 'tuya.test.echo.timestamp' and not verify_signature(
+                    url_params.copy(), key.decode('utf-8')):
+                self.send_error(403, "Invalid ATOP signature")
+                return
+            
+            # Parse request body (format: data=HEX_STRING)
+            if not body.startswith('data='):
+                self.send_error(400, "Bad Request: Invalid data format")
+                return
+            
+            encrypted_data_hex = body[5:]  # Skip "data="
+            
+            # Decrypt request
+            decrypted_data = aes_gcm_decrypt(key, encrypted_data_hex)
+            if decrypted_data is None:
+                self.send_error(400, "Bad Request: Decryption failed")
+                return
+            
+            print(f"📝 Decrypted request: {decrypted_data}")
+            
+            # Handle different APIs
+            if api == 'thing.device.opensdk.active':
+                response_json = handle_activate_request(decrypted_data, self.config)
+            elif api == 'thing.ai.agent.token.get':
+                response_json = handle_ai_token_request(decrypted_data, self.config)
+            elif api == 'tuya.device.qrcode.info.get':
+                response_json = handle_qrcode_info_request(decrypted_data, self.config, url_params)
+            elif api == 'tuya.device.meta.save':
+                response_json = handle_device_meta_save_request(decrypted_data, self.config)
+            elif api == 'tuya.device.info.sync':
+                response_json = handle_device_info_sync(decrypted_data, url_params)
+            elif api == 'tuya.device.reset':
+                response_json = handle_device_reset(decrypted_data, self.config, url_params)
+            elif api == 'tuya.device.schema.newest.get':
+                response_json = handle_schema_newest_get(decrypted_data, self.config)
+            elif api == 'tuya.device.upgrade.get':
+                response_json = handle_upgrade_get(decrypted_data, self.config)
+            elif api == 'tuya.device.versions.update':
+                response_json = handle_version_update(decrypted_data, self.config)
+            elif api == 'tuya.device.upgrade.status.update':
+                response_json = handle_upgrade_status_update(decrypted_data, self.config)
+            elif api == 'tuya.test.echo.timestamp':
+                # Reached only after MD5 signature validation above.
+                response_json = json.dumps({
+                    "success": True,
+                    "t": int(time.time()),
+                    "result": {"timestamp": url_params.get('t', ''),
+                               "signature_verified": True}
+                }, separators=(',', ':'))
+            elif api == 'tuya.test.huge.result':
+                # Test-only: a response deliberately larger than the default
+                # 4096-byte AGENTIC_KIT_RESPONSE_BUFFER_SIZE, reproducing the real failure
+                # recorded in CHANGELOG (a product whose schema came back at
+                # contentLength 6558). coreHTTP answers HTTPInsufficientMemory;
+                # the point of the test is that it now SAYS so.
+                response_json = json.dumps({
+                    "success": True,
+                    "t": int(time.time()),
+                    "result": {"blob": "x" * 6000}
+                }, separators=(',', ':'))
+            elif api == 'tuya.test.result.null':
+                # Test-only: a success envelope whose result is JSON null --
+                # the generic entry must hand this back as NULL, not "null".
+                response_json = json.dumps({
+                    "success": True,
+                    "t": int(time.time()),
+                    "result": None
+                }, separators=(',', ':'))
+            elif api == 'tuya.test.gateway.gone':
+                # Test-only: the errorCode that historically had a special
+                # OPRT_COMMUNICATION_ERROR mapping; it must now be the same
+                # uniform business error as every other rejection.
+                response_json = json.dumps({
+                    "success": False,
+                    "t": int(time.time()),
+                    "errorCode": "GATEWAY_NOT_EXISTS",
+                    "errorMsg": "device removed from the cloud"
+                }, separators=(',', ':'))
+            else:
+                response_json = json.dumps({
+                    "success": False,
+                    "t": int(time.time()),
+                    "errorCode": "UNKNOWN_API",
+                    "errorMsg": f"Unknown API: {api}"
+                }, separators=(',', ':'))
+            
+            print(f"📤 Response JSON: {response_json}")
+            
+            # Encrypt response using AES-128-GCM
+            encrypted_response_hex = aes_gcm_encrypt(key, response_json)
+            if encrypted_response_hex is None:
+                self.send_error(500, "Internal Server Error: Encryption failed")
+                return
+            
+            # Convert hex to bytes, then base64 encode
+            encrypted_response_bytes = bytes.fromhex(encrypted_response_hex)
+            encrypted_response_b64 = base64.b64encode(encrypted_response_bytes).decode('utf-8')
+            
+            # Create response JSON with base64-encoded encrypted data
+            response_obj = {
+                "result": encrypted_response_b64
+            }
+            response_body = json.dumps(response_obj, separators=(',', ':'))
+            
+            print(f"📤 Encrypted response (base64): {encrypted_response_b64[:64]}...")
+            
+            # Send response
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json;charset=UTF-8')
+            self.send_header('Content-Length', str(len(response_body)))
+            self.end_headers()
+            self.wfile.write(response_body.encode('utf-8'))
+            
+        except Exception as e:
+            print(f"❌ Error handling request: {e}", file=sys.stderr)
+            import traceback
+            traceback.print_exc()
+            self.send_error(500, f"Internal Server Error: {str(e)}")
+    
+    def do_GET(self):
+        """Handle GET requests (health check)"""
+        self.send_response(200)
+        self.send_header('Content-Type', 'text/plain')
+        self.end_headers()
+        self.wfile.write(b'ATOP Mock Server is running\n')
+    
+    def do_OPTIONS(self):
+        """Handle OPTIONS requests (CORS)"""
+        self.send_response(200)
+        self.send_header('Access-Control-Allow-Origin', '*')
+        self.send_header('Access-Control-Allow-Methods', 'POST, GET, OPTIONS')
+        self.send_header('Access-Control-Allow-Headers', 'Content-Type')
+        self.end_headers()
+
+
+def create_handler(config):
+    """Create handler class with config"""
+    class Handler(ATOPMockHandler):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, config=config, **kwargs)
+    return Handler
+
+
+def main():
+    """Main entry point"""
+    print("╔════════════════════════════════════════════════════════════╗")
+    print("║              ATOP Mock Server for ESP32 Testing            ║")
+    print("╚════════════════════════════════════════════════════════════╝")
+    print()
+    
+    # Load configuration
+    config = load_config()
+    
+    host = config.get('host', '127.0.0.1')
+    port = int(os.getenv('ATOP_MOCK_PORT', str(config.get('port', 443))))
+    
+    print(f"📋 Configuration:")
+    print(f"   Host: {host}")
+    print(f"   Port: {port}")
+    print(f"   UUID: {config.get('uuid', '(not set)')}")
+    print(f"   AuthKey: {'*' * 16 if config.get('authkey') else '(not set)'}")
+    print()
+    
+    # Create server
+    handler_class = create_handler(config)
+    server = ReusableHTTPServer((host, port), handler_class)
+    
+    # Setup SSL/TLS
+    # Automatically use TLS for port 443, HTTP for port 80
+    # Can be overridden with ATOP_MOCK_USE_SSL environment variable
+    use_ssl = False
+    if os.getenv('ATOP_MOCK_USE_SSL', '').lower() in ('1', 'true', 'yes'):
+        use_ssl = True
+    elif os.getenv('ATOP_MOCK_USE_SSL', '').lower() in ('0', 'false', 'no'):
+        use_ssl = False
+    else:
+        # Auto-detect based on port
+        use_ssl = (port == 443)
+    
+    if use_ssl:
+        config_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'config')
+        cert_file = os.getenv('ATOP_MOCK_CERT', os.path.join(config_dir, 'cert.pem'))
+        key_file = os.getenv('ATOP_MOCK_KEY', os.path.join(config_dir, 'key.pem'))
+        
+        if os.path.exists(cert_file) and os.path.exists(key_file):
+            context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            context.set_ciphers('ECDHE+AESGCM')
+            context.load_cert_chain(cert_file, key_file)
+            server.socket = context.wrap_socket(server.socket, server_side=True)
+            print(f"🔒 SSL/TLS enabled (cert: {cert_file}, key: {key_file})")
+        else:
+            print(f"⚠️  SSL requested but cert/key files not found, using plain HTTP")
+    
+    protocol = 'https' if use_ssl else 'http'
+    print(f"🚀 ATOP Mock Server started on {protocol}://{host}:{port}")
+    print(f"   Endpoint: /d.json")
+    print(f"   Protocol: {'HTTPS (TLS)' if use_ssl else 'HTTP'}")
+    print(f"   Supported APIs:")
+    print(f"     - thing.device.opensdk.active (device activation)")
+    print(f"     - thing.ai.agent.token.get (AI token)")
+    print(f"     - tuya.device.qrcode.info.get (QR code info)")
+    print(f"     - tuya.device.meta.save (device meta save)")
+    print(f"     - tuya.device.upgrade.get (firmware upgrade check)")
+    print(f"     - tuya.device.versions.update (firmware version report)")
+    print(f"     - tuya.device.upgrade.status.update (upgrade status report)")
+    print()
+    if port == 80 or port == 443:
+        print(f"⚠️  Note: Binding to port {port} may require root privileges")
+        print(f"   If you get 'Permission denied', try:")
+        print(f"     - Use sudo: sudo python3 atop_mock.py")
+        print(f"     - Or use a different port (e.g., 8080 for HTTP, 8443 for HTTPS)")
+    print()
+    print("Press Ctrl+C to stop the server")
+    print()
+    
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        print("\n🛑 Shutting down server...")
+        server.shutdown()
+        print("✅ Server stopped")
+
+
+if __name__ == '__main__':
+    main()
+

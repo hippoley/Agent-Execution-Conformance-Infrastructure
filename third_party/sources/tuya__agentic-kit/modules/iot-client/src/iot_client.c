@@ -1,0 +1,915 @@
+#include "iot_client.h"
+#include "iot_dp.h"
+#include "iot_dp_internal.h"
+#include "iot_internal.h"
+#include "iot_on_boarding.h"
+#include "iot_dns.h"
+#include "iot_client_message.h"
+#include "iot_ota.h"
+#include "iot_atop.h"
+#include "cipher_wrapper.h"
+#include "iot_internal.h"
+#include "rng.h"
+
+#include "atop.h"
+#include "atop_base.h"
+#include "cJSON.h"
+#include <string.h>
+#include <stdlib.h>
+#include <stdio.h>
+#include <inttypes.h>
+
+static const pal_t *g_iot_pal = NULL;
+
+static void set_pal(const pal_t *pal)
+{
+    g_iot_pal = pal;
+}
+
+static const pal_t* get_pal(void)
+{
+    return g_iot_pal;
+}
+
+static const char *iot_env_to_string(iot_env_t env)
+{
+    return env == PRE ? "pre" : "prod";
+}
+
+static int parse_host_port(const char *url, char *host_out, size_t host_len, uint16_t *port_out)
+{
+    const char *p = url;
+    if (strncmp(p, "https://", 8) == 0) p += 8;
+    else if (strncmp(p, "mqtts://", 8) == 0) p += 8;
+    else if (strncmp(p, "http://", 7) == 0) p += 7;
+
+    const char *colon = strchr(p, ':');
+    const char *slash = strchr(p, '/');
+    if (colon && (!slash || colon < slash)) {
+        size_t hlen = colon - p;
+        if (hlen >= host_len) hlen = host_len - 1;
+        memcpy(host_out, p, hlen);
+        host_out[hlen] = '\0';
+
+        char *endptr = NULL;
+        unsigned long port_val = strtoul(colon + 1, &endptr, 10);
+        if (endptr == colon + 1 || port_val == 0 || port_val > 65535) {
+            IOT_LOGE("Invalid port in URL: %s", url);
+            return OPRT_INVALID_PARAMETER;
+        }
+        if (*endptr != '\0' && *endptr != '/' && endptr != slash) {
+            IOT_LOGE("Invalid characters after port in URL: %s", url);
+            return OPRT_INVALID_PARAMETER;
+        }
+        *port_out = (uint16_t)port_val;
+    } else {
+        const char *end = slash ? slash : p + strlen(p);
+        size_t hlen = end - p;
+        if (hlen >= host_len) hlen = host_len - 1;
+        memcpy(host_out, p, hlen);
+        host_out[hlen] = '\0';
+        *port_out = 443;
+    }
+    return OPRT_OK;
+}
+
+/* Resolve the ATOP host/port for this client. Shared by iot_client_get_session_token()
+ * and the DP-layer schema-update query (declared in iot_dp_internal.h). */
+void iot_client_resolve_atop_host(iot_client_t *client, char *host_out, size_t host_len, uint16_t *port_out)
+{
+    *port_out = IOT_DEFAULT_PORT;
+    if (host_len == 0) return;
+    host_out[0] = '\0';
+    if (client->https_url[0] != '\0') {
+        parse_host_port(client->https_url, host_out, host_len, port_out);
+    } else {
+        const char *h = iot_region_to_host(client->region, client->env);
+        if (h) {
+            strncpy(host_out, h, host_len - 1);
+            host_out[host_len - 1] = '\0';
+        }
+    }
+}
+
+static int iot_client_dns_resolve(iot_client_t *client)
+{
+    const char *mqtt_dns_key = client->mqtt_disable_tls ? IOT_DNS_KEY_MQTT
+                                                        : IOT_DNS_KEY_MQTTS;
+    iot_dns_config_item_t dns_keys[] = {
+        { .key = mqtt_dns_key },
+        { .key = IOT_DNS_KEY_HTTPS },
+    };
+    iot_dns_url_config_request_t dns_req = {
+        .cacert = client->cacert,
+        .cert_bundle_attach = client->cert_bundle_attach,
+        .host = NULL,
+        .port = 0,
+        .region = iot_region_to_string(client->region),
+        .env = iot_env_to_string(client->env),
+        .uuid = client->devid,
+        .config = dns_keys,
+        .config_count = 2,
+    };
+    iot_dns_url_config_response_t dns_resp = {0};
+    int ret = iot_dns_url_config(client->pal, &dns_req, &dns_resp);
+    if (ret != OPRT_OK) {
+        IOT_LOGW("Failed to query IoT DNS for service URLs: %d", ret);
+        return ret;
+    }
+
+    for (int i = 0; i < dns_resp.endpoint_count; i++) {
+        if (strcmp(dns_resp.endpoints[i].key, mqtt_dns_key) == 0) {
+            const char *scheme = client->mqtt_disable_tls ? "mqtt" : "mqtts";
+            const char *addr = dns_resp.endpoints[i].addr;
+            int sn = snprintf(client->mqtt_url, sizeof(client->mqtt_url),
+                              "%s://%s", scheme, addr);
+            if (sn < 0 || (size_t)sn >= sizeof(client->mqtt_url)) {
+                client->mqtt_url[0] = '\0';   /* too long: leave unresolved */
+                IOT_LOGW("IoT DNS %s url too long, ignored", mqtt_dns_key);
+            } else {
+                IOT_LOGI("IoT DNS %s: %s", mqtt_dns_key, client->mqtt_url);
+            }
+        } else if (strcmp(dns_resp.endpoints[i].key, IOT_DNS_KEY_HTTPS) == 0) {
+            const char *addr = dns_resp.endpoints[i].addr;
+            int sn = snprintf(client->https_url, sizeof(client->https_url), "%s", addr);
+            if (sn < 0 || (size_t)sn >= sizeof(client->https_url)) {
+                client->https_url[0] = '\0';
+                IOT_LOGW("IoT DNS %s too long, ignored", IOT_DNS_KEY_HTTPS);
+            } else {
+                IOT_LOGI("IoT DNS %s: %s", IOT_DNS_KEY_HTTPS, client->https_url);
+            }
+        }
+    }
+    iot_dns_url_config_response_free(client->pal, &dns_resp);
+
+    /* A key we asked for but did not get back is not an HTTP error: the service
+     * answers 200 with ttl/caArr and simply omits the endpoint object (that is
+     * how an unknown `region` presents). Say so here, or the only symptom is a
+     * refused MQTT connect several layers away, with nothing pointing back. */
+    if (client->mqtt_url[0] == '\0') {
+        IOT_LOGW("IoT DNS returned no %s for region=%s env=%s — MQTT stays unresolved",
+                 mqtt_dns_key, dns_req.region ? dns_req.region : "(unset)", dns_req.env);
+    }
+    if (client->https_url[0] == '\0') {
+        IOT_LOGW("IoT DNS returned no %s for region=%s env=%s — falling back to %s",
+                 IOT_DNS_KEY_HTTPS, dns_req.region ? dns_req.region : "(unset)",
+                 dns_req.env, iot_region_to_host(client->region, client->env));
+    }
+
+    return OPRT_OK;
+}
+
+int iot_init(const pal_t *pal)
+{
+    if (!pal_is_valid(pal)) {
+        IOT_LOGE("iot_init: invalid PAL adapter (NULL or missing function pointers)");
+        return OPRT_INVALID_PARAMETER;
+    }
+    set_pal(pal);
+    /* Eager-seed the shared DRBG before any worker threads spawn. Every TLS
+     * handshake (mqtt/http) and every AES-GCM nonce depends on it; rng_bytes()
+     * fails closed if seeding failed, so surface the failure here rather than
+     * letting it resurface later as opaque handshake / nonce errors. */
+    if (rng_init(pal) != 0) {
+        IOT_LOGE("iot_init: RNG seed failed (no strong entropy source?)");
+        return OPRT_COMMUNICATION_ERROR;
+    }
+
+    cJSON_Hooks hooks = { .malloc_fn = pal->malloc, .free_fn = pal->free };
+    cJSON_InitHooks(&hooks);
+
+    return OPRT_OK;
+}
+
+int iot_init_default(void)
+{
+    return iot_init(get_default_pal());
+}
+
+int iot_client_report_init_versions(iot_client_t *client,
+                                    const iot_client_config_t *config)
+{
+    if (client == NULL || config == NULL) {
+        return OPRT_INVALID_PARAMETER;
+    }
+    if (config->skip_version_report) {
+        IOT_LOGI("skip_version_report set: skipping SDK-meta and firmware-version reports");
+        return OPRT_OK;
+    }
+
+    int ret = OPRT_OK;
+
+    /* Report SDK version to cloud */
+    {
+        char meta_host[64] = {0};
+        uint16_t meta_port = IOT_DEFAULT_PORT;
+        const char *host;
+        if (client->https_url[0] != '\0') {
+            parse_host_port(client->https_url, meta_host, sizeof(meta_host), &meta_port);
+            host = meta_host;
+        } else {
+            host = iot_region_to_host(client->region, client->env);
+        }
+        device_meta_save_request_t meta_req = {
+            .devid       = client->devid,
+            .key         = client->secret_key,
+            .sdk_version = SDK_VERSION,
+            .host        = host,
+            .port        = meta_port,
+            .cacert      = client->cacert,
+            .cert_bundle_attach = client->cert_bundle_attach,
+        };
+        device_meta_save_response_t meta_resp = {0};
+        int meta_ret = atop_device_meta_save(client->pal, &meta_req, &meta_resp);
+        if (meta_ret != OPRT_OK) {
+            IOT_LOGW("atop_device_meta_save failed: %d (non-fatal)", meta_ret);
+            ret = meta_ret;
+        }
+    }
+
+    /* Report firmware version to cloud (enables OTA upgrade checks) */
+    {
+        const char *fw_ver = (config->sw_ver && config->sw_ver[0])
+                             ? config->sw_ver
+                             : IOT_SDK_SW_VER;
+        int ver_ret = iot_ota_report_version(client, fw_ver);
+        if (ver_ret != OPRT_OK) {
+            IOT_LOGW("iot_ota_report_version failed: %d (non-fatal)", ver_ret);
+            if (ret == OPRT_OK) {
+                ret = ver_ret;
+            }
+        }
+    }
+
+    return ret;
+}
+
+IOT_API iot_client_t *iot_client_init(const iot_client_config_t *config)
+{
+    if (!config) {
+        IOT_LOGE("Invalid config for iot_client_init");
+        return NULL;
+    }
+
+    const pal_t *pal = get_pal();
+    if (!pal) {
+        IOT_LOGE("iot_client_init: PAL not initialized — call iot_init() first");
+        return NULL;
+    }
+    iot_client_t *client = (iot_client_t *)pal->malloc(sizeof(iot_client_t));
+    if (client == NULL) {
+        IOT_LOGE("Failed to allocate iot_client_t");
+        return NULL;
+    }
+    memset(client, 0, sizeof(iot_client_t));
+    client->pal = pal;
+
+    strncpy(client->devid, config->devid, sizeof(client->devid) - 1);
+    client->devid[sizeof(client->devid) - 1] = '\0';
+    strncpy(client->secret_key, config->secret_key, sizeof(client->secret_key) - 1);
+    client->secret_key[sizeof(client->secret_key) - 1] = '\0';
+    strncpy(client->local_key, config->local_key, sizeof(client->local_key) - 1);
+    client->local_key[sizeof(client->local_key) - 1] = '\0';
+    client->region = config->region;
+    client->env = config->env;
+    client->mqtt_disable_tls = config->mqtt_disable_tls;
+    client->cacert = config->cacert;
+    client->cert_bundle_attach = config->cert_bundle_attach;
+    client->message_callback = config->message_callback;
+    client->reset_callback = config->reset_callback;
+    client->reset_user_data = config->reset_user_data;
+    client->ota_confirm_callback = config->ota_confirm_callback;
+    client->ota_confirm_user_data = config->ota_confirm_user_data;
+
+    /* DP layer: restore persisted schema_id / schema from config (restart path).
+     * On-boarding paths leave these NULL here and set them after activation. */
+    if (config->schema_id && config->schema_id[0] != '\0') {
+        strncpy(client->schema_id, config->schema_id, sizeof(client->schema_id) - 1);
+        client->schema_id[sizeof(client->schema_id) - 1] = '\0';
+    }
+    if (config->schema && config->schema[0] != '\0') {
+        client->schema = pal_strdup(pal, config->schema);
+    }
+
+    if (client->devid[0] != '\0') {
+        iot_client_dns_resolve(client);
+    }
+
+    if (client->mqtt_url[0] != '\0' && !config->mqtt_disable_auto_connect) {
+        int ret = iot_client_message_connect(client);
+        if (ret != OPRT_OK) {
+            IOT_LOGE("MQTT connect failed: %d", ret);
+            iot_client_deinit(client);
+            return NULL;
+        }
+    }
+
+    /* No test executes this call (a non-empty devid resolves DNS against the
+     * real IoT-DNS service here); the skip/no-skip contract is pinned at the
+     * helper against the ATOP mock — this wiring line is pinned by review. */
+    iot_client_report_init_versions(client, config);
+
+    /* DP layer: build the registry from the (possibly restored) schema, then
+     * restore persisted DP values without marking dirty / publishing. */
+    iot_dp_rebuild(client);
+    if (config->dp_state && config->dp_state[0] != '\0') {
+        iot_dp_restore_json(client, config->dp_state);
+    }
+
+    return client;
+}
+
+IOT_API void iot_client_deinit(iot_client_t *client)
+{
+    if (client == NULL) {
+        return;
+    }
+    iot_client_message_disconnect(client);
+    iot_dp_deinit(client);   /* after disconnect: no more dispatch on the process thread */
+    if (client->schema) {
+        client->pal->free(client->schema);
+    }
+    const pal_t *pal = client->pal;
+    /* Wipe before freeing: devid, secret_key and local_key are plaintext in this
+     * struct, and on an embedded allocator the next malloc of a similar size
+     * hands the block -- keys included -- to unrelated code. Matters most on the
+     * iot_client_reset() path, where the device is being decommissioned or handed
+     * to a new owner. Written through a volatile pointer so the store survives:
+     * a plain memset() immediately before free() is a dead store the compiler is
+     * free to elide. */
+    volatile unsigned char *wipe = (volatile unsigned char *)client;
+    for (size_t i = 0; i < sizeof(*client); i++) {
+        wipe[i] = 0;
+    }
+    pal->free(client);
+}
+
+/* From the interface doc. Not the "1.0" most tuya.device.* interfaces use, so it
+ * is easy to "correct" by mistake -- and a wrong version does not fail locally,
+ * it comes back as a cloud rejection that reads like a network fault. The mock
+ * verifies this exact value so a slip fails in iot_reset_test. */
+#define IOT_ATOP_API_DEVICE_RESET         "tuya.device.reset"
+#define IOT_ATOP_API_DEVICE_RESET_VERSION "5.0"
+
+IOT_API int iot_client_reset(iot_client_t *client,
+                             iot_reset_scope_t scope,
+                             char *error_code, size_t error_code_len)
+{
+    if (error_code != NULL && error_code_len > 0) {
+        error_code[0] = '\0';
+    }
+    if (client == NULL || client->pal == NULL) {
+        return OPRT_INVALID_PARAMETER;
+    }
+
+    /* Built on the generic entry rather than a dedicated wrapper: it already
+     * owns signing, AES-GCM, host resolution, envelope parsing and the
+     * credential check (returning OPRT_UNINITIALIZED before activation) -- and,
+     * unlike a result-less named wrapper, it hands back the cloud's errorCode,
+     * which is the one thing a caller needs to tell a terminal rejection from a
+     * retryable one. */
+    /* resetFactory picks between the cloud's two meanings for removing a device
+     * -- the same pair the inbound protocol-11 notice carries as
+     * IOT_RESET_REMOTE_FACTORY vs IOT_RESET_REMOTE_UNBIND. false gives up the
+     * binding and leaves the device's cloud-side data alone; true also discards
+     * that data, irreversibly. The field is required either way: omitting it is
+     * rejected, and the mock asserts its presence so that fails in
+     * iot_reset_test rather than as an opaque rejection on a device. */
+    char body[64];
+    int sn = snprintf(body, sizeof(body),
+                      "{\"resetFactory\":%s,\"t\":%" PRIu32 "}",
+                      (scope == IOT_RESET_FACTORY) ? "true" : "false",
+                      (uint32_t)(client->pal->wal_clock_time() / 1000U));
+    if (sn < 0 || (size_t)sn >= sizeof(body)) {
+        return OPRT_COMMUNICATION_ERROR;
+    }
+
+    iot_atop_request_t request = { .api     = IOT_ATOP_API_DEVICE_RESET,
+                                   .version = IOT_ATOP_API_DEVICE_RESET_VERSION,
+                                   .data    = body };
+    iot_atop_response_t response = {0};
+    int rt = iot_atop_call(client, &request, &response);
+
+    if (error_code != NULL && error_code_len > 0) {
+        snprintf(error_code, error_code_len, "%s", response.error_code);
+    }
+
+    if (rt != OPRT_OK) {
+        /* Leave the client intact: the caller may retry, and a half-torn-down
+         * client the cloud still considers bound is worse than none. */
+        IOT_LOGE("iot_client_reset failed: %d errorCode=%s", rt,
+                  response.error_code);
+        iot_atop_response_free(client, &response);
+        return rt;
+    }
+
+    /* This interface answers with an empty result object, so there is nothing
+     * to read -- only to release, before the client that owns the allocator. */
+    iot_atop_response_free(client, &response);
+
+    /* Teardown last: the call above signs with client->devid / secret_key. */
+    iot_client_deinit(client);
+    return OPRT_OK;
+}
+
+IOT_API iot_client_t *iot_client_init_on_boarding(const iot_on_boarding_config_t *config)
+{
+    if (!config) {
+        IOT_LOGE("Invalid config for iot_client_init_on_boarding");
+        return NULL;
+    }
+
+    const pal_t *pal = get_pal();
+    if (!pal) {
+        IOT_LOGE("iot_client_init_on_boarding: PAL not initialized — call iot_init() first");
+        return NULL;
+    }
+
+    if (config->uuid[0] == '\0') {
+        IOT_LOGE("uuid is required for on boarding");
+        return NULL;
+    }
+
+    IOT_LOGI("iot_client_init_on_boarding: uuid=%s", config->uuid);
+
+    /* Build the internal on_boarding_config_t from the public config */
+    on_boarding_config_t ob_cfg = {0};
+    strncpy(ob_cfg.uuid, config->uuid, sizeof(ob_cfg.uuid) - 1);
+    strncpy(ob_cfg.authkey, config->authkey, sizeof(ob_cfg.authkey) - 1);
+    strncpy(ob_cfg.product_key, config->product_key, sizeof(ob_cfg.product_key) - 1);
+
+    const char *sw_ver = (config->sw_ver && config->sw_ver[0])
+                         ? config->sw_ver
+                         : IOT_SDK_SW_VER;
+    strncpy(ob_cfg.sw_ver, sw_ver, sizeof(ob_cfg.sw_ver) - 1);
+    strncpy(ob_cfg.pv, IOT_SDK_PV, sizeof(ob_cfg.pv) - 1);
+    strncpy(ob_cfg.bv, IOT_SDK_BV, sizeof(ob_cfg.bv) - 1);
+
+    ob_cfg.modules = config->modules;
+    ob_cfg.feature = config->feature;
+    ob_cfg.skill_param = config->skill_param;
+    if (config->firmware_key[0] != '\0')
+        strncpy(ob_cfg.firmware_key, config->firmware_key, sizeof(ob_cfg.firmware_key) - 1);
+
+    ob_cfg.timeout_ms = config->timeout_ms;
+    ob_cfg.env = config->env;
+    ob_cfg.mqtt_disable_tls = config->mqtt_disable_tls;
+    ob_cfg.cacert = config->cacert;
+    ob_cfg.cert_bundle_attach = config->cert_bundle_attach;
+    ob_cfg.dns_host = NULL;
+    ob_cfg.dns_port = 0;
+
+    /* Wait for QR code activation */
+    on_boarding_response_t ob_resp = {0};
+    int ret = on_boarding_with_qrcode(pal, &ob_cfg, &ob_resp);
+    if (ret != OPRT_OK) {
+        IOT_LOGE("on_boarding_with_qrcode failed: %d", ret);
+        return NULL;
+    }
+
+    IOT_LOGI("On-boarding successful, initializing client with activated credentials");
+
+    /* Build iot_client_config_t from activation results and call iot_client_init.
+     * Hand-copy block — AGENTS.md invariant: a new iot_client_config_t field must
+     * be written here AND in iot_client_init_on_boarding_with_token AND read in
+     * iot_client_init(). No test executes this forwarding (the public onboarding
+     * path resolves DNS against the real service), so a dropped line fails
+     * silently — pinned by review only. */
+    iot_client_config_t client_config = {0};
+    strncpy(client_config.devid, ob_resp.devid, sizeof(client_config.devid) - 1);
+    strncpy(client_config.secret_key, ob_resp.secret_key, sizeof(client_config.secret_key) - 1);
+    strncpy(client_config.local_key, ob_resp.local_key, sizeof(client_config.local_key) - 1);
+    client_config.region = ob_resp.region;
+    client_config.env = ob_resp.env;
+    client_config.mqtt_disable_tls = config->mqtt_disable_tls;
+    client_config.mqtt_disable_auto_connect = config->mqtt_disable_auto_connect;
+    client_config.skip_version_report = config->skip_version_report;
+    client_config.cacert = config->cacert;
+    client_config.cert_bundle_attach = config->cert_bundle_attach;
+    client_config.message_callback = config->message_callback;
+    client_config.reset_callback = config->reset_callback;
+    client_config.reset_user_data = config->reset_user_data;
+    client_config.ota_confirm_callback = config->ota_confirm_callback;
+    client_config.ota_confirm_user_data = config->ota_confirm_user_data;
+    client_config.sw_ver = sw_ver;
+    /* schema / schema_id come from the activation response. iot_client_init()
+     * copies them and rebuilds the DP registry from the schema (dp_state is then
+     * initialized from the schema); first activation has no persisted DP values. */
+    client_config.schema    = ob_resp.schema;
+    client_config.schema_id = ob_resp.schema_id;
+    client_config.dp_state  = NULL;
+
+    iot_client_t *client = iot_client_init(&client_config);
+    pal->free(ob_resp.schema);   /* iot_client_init copied it (or failed) */
+    if (client == NULL) {
+        IOT_LOGE("iot_client_init failed after on-boarding");
+        return NULL;
+    }
+
+    /* First activation: seed schema-derived default DP values (marked dirty) so
+     * the app can report a complete initial state. */
+    iot_dp_init_defaults(client);
+
+    return client;
+}
+
+IOT_API iot_client_t *iot_client_init_on_boarding_with_token(const iot_on_boarding_config_t *config, const char *token)
+{
+    if (!config) {
+        IOT_LOGE("Invalid config for iot_client_init_on_boarding_with_token");
+        return NULL;
+    }
+
+    const pal_t *pal = get_pal();
+    if (!pal) {
+        IOT_LOGE("iot_client_init_on_boarding_with_token: PAL not initialized — call iot_init() first");
+        return NULL;
+    }
+
+    if (config->uuid[0] == '\0') {
+        IOT_LOGE("uuid is required for on boarding with token");
+        return NULL;
+    }
+
+    if (!token || token[0] == '\0') {
+        IOT_LOGE("token is required for on boarding with token");
+        return NULL;
+    }
+
+    IOT_LOGI("iot_client_init_on_boarding_with_token: uuid=%s", config->uuid);
+
+    on_boarding_config_t ob_cfg = {0};
+    strncpy(ob_cfg.uuid, config->uuid, sizeof(ob_cfg.uuid) - 1);
+    strncpy(ob_cfg.authkey, config->authkey, sizeof(ob_cfg.authkey) - 1);
+    strncpy(ob_cfg.product_key, config->product_key, sizeof(ob_cfg.product_key) - 1);
+
+    const char *sw_ver = (config->sw_ver && config->sw_ver[0])
+                         ? config->sw_ver
+                         : IOT_SDK_SW_VER;
+    strncpy(ob_cfg.sw_ver, sw_ver, sizeof(ob_cfg.sw_ver) - 1);
+    strncpy(ob_cfg.pv, IOT_SDK_PV, sizeof(ob_cfg.pv) - 1);
+    strncpy(ob_cfg.bv, IOT_SDK_BV, sizeof(ob_cfg.bv) - 1);
+
+    ob_cfg.modules = config->modules;
+    ob_cfg.feature = config->feature;
+    ob_cfg.skill_param = config->skill_param;
+    if (config->firmware_key[0] != '\0')
+        strncpy(ob_cfg.firmware_key, config->firmware_key, sizeof(ob_cfg.firmware_key) - 1);
+
+    ob_cfg.env = config->env;
+    ob_cfg.mqtt_disable_tls = config->mqtt_disable_tls;
+    ob_cfg.cacert = config->cacert;
+    ob_cfg.cert_bundle_attach = config->cert_bundle_attach;
+    ob_cfg.dns_host = NULL;
+    ob_cfg.dns_port = 0;
+
+    on_boarding_response_t ob_resp = {0};
+    int ret = on_boarding_with_token(pal, &ob_cfg, token, &ob_resp);
+    if (ret != OPRT_OK) {
+        IOT_LOGE("on_boarding_with_token failed: %d", ret);
+        return NULL;
+    }
+
+    IOT_LOGI("On-boarding with token successful, initializing client with activated credentials");
+
+    /* Hand-copy block — same AGENTS.md invariant as in iot_client_init_on_boarding():
+     * a new iot_client_config_t field must be forwarded here too, and no test
+     * executes this forwarding — pinned by review only. */
+    iot_client_config_t client_config = {0};
+    strncpy(client_config.devid, ob_resp.devid, sizeof(client_config.devid) - 1);
+    strncpy(client_config.secret_key, ob_resp.secret_key, sizeof(client_config.secret_key) - 1);
+    strncpy(client_config.local_key, ob_resp.local_key, sizeof(client_config.local_key) - 1);
+    client_config.region = ob_resp.region;
+    client_config.env = ob_resp.env;
+    client_config.mqtt_disable_tls = config->mqtt_disable_tls;
+    client_config.mqtt_disable_auto_connect = config->mqtt_disable_auto_connect;
+    client_config.skip_version_report = config->skip_version_report;
+    client_config.cacert = config->cacert;
+    client_config.cert_bundle_attach = config->cert_bundle_attach;
+    client_config.message_callback = config->message_callback;
+    client_config.reset_callback = config->reset_callback;
+    client_config.reset_user_data = config->reset_user_data;
+    client_config.ota_confirm_callback = config->ota_confirm_callback;
+    client_config.ota_confirm_user_data = config->ota_confirm_user_data;
+    client_config.sw_ver = sw_ver;
+    /* schema / schema_id come from the activation response. iot_client_init()
+     * copies them and rebuilds the DP registry from the schema (dp_state is then
+     * initialized from the schema); first activation has no persisted DP values. */
+    client_config.schema    = ob_resp.schema;
+    client_config.schema_id = ob_resp.schema_id;
+    client_config.dp_state  = NULL;
+
+    iot_client_t *client = iot_client_init(&client_config);
+    pal->free(ob_resp.schema);   /* iot_client_init copied it (or failed) */
+    if (client == NULL) {
+        IOT_LOGE("iot_client_init failed after on-boarding with token");
+        return NULL;
+    }
+
+    /* First activation: seed schema-derived default DP values (marked dirty) so
+     * the app can report a complete initial state. */
+    iot_dp_init_defaults(client);
+
+    return client;
+}
+
+IOT_API int iot_client_get_session_token(iot_client_t *client, const char *agent_code, char *token, size_t token_len)
+{
+    return iot_client_get_session_token_ex(client, agent_code, token, token_len, NULL);
+}
+
+IOT_API int iot_client_get_session_token_ex(iot_client_t *client, const char *agent_code,
+                                            char *token, size_t token_len,
+                                            iot_atop_rejection_t *rejection)
+{
+    if (rejection != NULL) {
+        memset(rejection, 0, sizeof(*rejection));
+    }
+
+    if (client == NULL || token == NULL || token_len == 0) {
+        IOT_LOGE("iot_client_get_session_token: invalid parameters");
+        return OPRT_INVALID_PARAMETER;
+    }
+
+    char parsed_host[64] = {0};
+    uint16_t parsed_port = IOT_DEFAULT_PORT;
+    iot_client_resolve_atop_host(client, parsed_host, sizeof(parsed_host), &parsed_port);
+    const char *host = parsed_host[0] ? parsed_host : NULL;
+    ai_token_request_t req = {
+        .devid = client->devid,
+        .key = client->secret_key,
+        .agent_code = agent_code,
+        .host = host,
+        .port = parsed_port,
+        .cacert = client->cacert,
+        .cert_bundle_attach = client->cert_bundle_attach,
+    };
+
+    ai_token_response_t resp = {0};
+    int ret = atop_ai_token_get(client->pal, &req, &resp);
+    if (ret != OPRT_OK) {
+        if (rejection != NULL) {
+            *rejection = resp.rejection;
+        }
+        IOT_LOGE("atop_ai_token_get failed: %d", ret);
+        return ret;
+    }
+    size_t resp_token_len = strlen(resp.token);
+    if (resp_token_len >= token_len) {
+        IOT_LOGE("token buffer too small: need %zu, have %zu", resp_token_len + 1, token_len);
+        client->pal->free(resp.token);
+        return OPRT_INVALID_RESULT;
+    }
+    memcpy(token, resp.token, resp_token_len);
+    token[resp_token_len] = '\0';
+    client->pal->free(resp.token);
+    return OPRT_OK;
+}
+
+IOT_API int iot_get_binding_status(const iot_binding_status_request_t *request,
+                                  iot_binding_status_t *status)
+{
+    if (request == NULL || status == NULL ||
+        request->devid == NULL || request->devid[0] == '\0' ||
+        request->secret_key == NULL || strlen(request->secret_key) < 16) {
+        return OPRT_INVALID_PARAMETER;
+    }
+
+    const pal_t *pal = get_pal();
+    if (pal == NULL) {
+        return OPRT_UNINITIALIZED;
+    }
+
+    uint32_t timestamp = (uint32_t)(pal->wal_clock_time() / 1000U);
+    char body[32];
+    int body_len = snprintf(body, sizeof(body), "{\"t\":%" PRIu32 "}", timestamp);
+    if (body_len < 0 || (size_t)body_len >= sizeof(body)) {
+        return OPRT_INVALID_RESULT;
+    }
+
+    const char *host = (request->host != NULL && request->host[0] != '\0')
+                           ? request->host : iot_region_to_host(request->region, request->env);
+    atop_base_request_t atop_request = {
+        .api = "tuya.device.info.sync",
+        .version = "1.0",
+        .path = "/d.json",
+        .devid = request->devid,
+        .key = request->secret_key,
+        .timestamp = timestamp,
+        .data = (void *)body,
+        .datalen = (size_t)body_len,
+        .host = host,
+        .port = request->port ? request->port : IOT_DEFAULT_PORT,
+        .cacert = request->cacert,
+        .cert_bundle_attach = request->cert_bundle_attach,
+    };
+    atop_base_response_t response = {0};
+    int rt = atop_base_request(pal, &atop_request, &response);
+    if (rt != OPRT_OK) {
+        atop_base_response_free(pal, &response);
+        return rt;
+    }
+
+    /* A successful Envelope without a known status is not evidence that the
+     * device is still bound. Keep the caller's output untouched on failure. */
+    rt = OPRT_INVALID_RESULT;
+    cJSON *result = response.result;
+    if (cJSON_IsObject(result)) {
+        cJSON *value = cJSON_GetObjectItemCaseSensitive(result, "status");
+        if (cJSON_IsString(value) && value->valuestring != NULL) {
+            if (strcmp(value->valuestring, "enable") == 0) {
+                *status = IOT_BINDING_STATUS_BOUND;
+                rt = OPRT_OK;
+            } else if (strcmp(value->valuestring, "reset") == 0) {
+                *status = IOT_BINDING_STATUS_UNBOUND;
+                rt = OPRT_OK;
+            } else if (strcmp(value->valuestring, "reset_factory") == 0) {
+                *status = IOT_BINDING_STATUS_FACTORY_RESET;
+                rt = OPRT_OK;
+            }
+        }
+    }
+    atop_base_response_free(pal, &response);
+    return rt;
+}
+
+IOT_API int iot_client_get_binding_status(iot_client_t *client, iot_binding_status_t *status)
+{
+    if (client == NULL || client->pal == NULL || status == NULL) {
+        return OPRT_INVALID_PARAMETER;
+    }
+    if (client->devid[0] == '\0' || client->secret_key[0] == '\0') {
+        return OPRT_UNINITIALIZED;
+    }
+
+    char host[64] = {0};
+    uint16_t port = IOT_DEFAULT_PORT;
+    iot_client_resolve_atop_host(client, host, sizeof(host), &port);
+    iot_binding_status_request_t request = {
+        .devid = client->devid,
+        .secret_key = client->secret_key,
+        .region = client->region,
+        .env = client->env,
+        .host = host,
+        .port = port,
+        .cacert = client->cacert,
+        .cert_bundle_attach = client->cert_bundle_attach,
+    };
+    return iot_get_binding_status(&request, status);
+}
+
+IOT_API int iot_client_connect(iot_client_t *client)
+{
+    /* No NULL guard, like its neighbour below: iot_client_message_connect()
+     * already rejects NULL (along with a missing url/devid) with the same
+     * OPRT_INVALID_PARAMETER, so a guard here could only duplicate it. */
+    return iot_client_message_connect(client);
+}
+
+IOT_API void iot_client_disconnect(iot_client_t *client)
+{
+    /* No NULL guard, unlike its neighbours: this one returns void, so the
+     * guard could only swallow the argument -- and the callee is already
+     * documented NULL-safe and no-op when not connected. */
+    iot_client_message_disconnect(client);
+}
+
+IOT_API int iot_client_process(iot_client_t *client, uint32_t timeout_ms)
+{
+    if (client == NULL) {
+        return OPRT_INVALID_PARAMETER;
+    }
+    return iot_client_message_process(client, timeout_ms);
+}
+
+IOT_API int iot_client_publish(iot_client_t *client, const uint8_t *data, size_t data_len)
+{
+    if (client == NULL) {
+        return OPRT_INVALID_PARAMETER;
+    }
+    return iot_client_message_publish(client, data, data_len);
+}
+
+IOT_API int iot_get_ca_certificate(iot_client_t *client, const char *host, uint16_t port, char *ca_certificate, size_t ca_certificate_len)
+{
+    if (client == NULL || host == NULL || ca_certificate == NULL || ca_certificate_len == 0) {
+        return OPRT_INVALID_PARAMETER;
+    }
+
+    const pal_t *pal = client->pal;
+    iot_dns_ca_cert_request_t req = {
+        .host = IOT_DNS_DEFAULT_HOST,
+        .port = IOT_DNS_DEFAULT_PORT,
+        .cacert = client->cacert,
+        .cert_bundle_attach = client->cert_bundle_attach,
+        .target_host = host,
+        .target_port = port,
+        .public_key_algorithm = "ECDSA",
+    };
+
+    iot_dns_ca_cert_response_t resp = {0};
+    int ret = iot_dns_get_ca_cert(pal, &req, &resp);
+    if (ret != OPRT_OK) {
+        IOT_LOGE("iot_dns_get_ca_cert failed: %d", ret);
+        return ret;
+    }
+
+    size_t cert_len = resp.ca_certificate ? strlen(resp.ca_certificate) : 0;
+    if (cert_len == 0) {
+        IOT_LOGE("iot_get_ca_certificate: no CA cert for %s:%u", host, port);
+        iot_dns_ca_cert_response_free(pal, &resp);
+        return OPRT_INVALID_RESULT;
+    }
+    if (cert_len >= ca_certificate_len) {
+        IOT_LOGE("ca_certificate buffer too small: need %zu, have %zu", cert_len + 1, ca_certificate_len);
+        iot_dns_ca_cert_response_free(pal, &resp);
+        return OPRT_INVALID_RESULT;
+    }
+    memcpy(ca_certificate, resp.ca_certificate, cert_len);
+    ca_certificate[cert_len] = '\0';
+    iot_dns_ca_cert_response_free(pal, &resp);
+    return OPRT_OK;
+}
+
+IOT_API int iot_get_qrcode_info(const iot_qrcode_request_t *request, char *url, size_t url_len)
+{
+    const pal_t *pal = get_pal();
+    if (!pal) {
+        IOT_LOGE("iot_get_qrcode_info: PAL not initialized — call iot_init() first");
+        return OPRT_UNINITIALIZED;
+    }
+
+    if (request == NULL || url == NULL || url_len == 0) {
+        return OPRT_INVALID_PARAMETER;
+    }
+
+    const char *region_str = iot_region_to_string(request->region);
+    if (region_str == NULL) {
+        region_str = "AY";
+    }
+
+    iot_dns_config_item_t dns_keys[] = {
+        { .key = IOT_DNS_KEY_HTTPS },
+    };
+    iot_dns_url_config_request_t dns_req = {
+        .cacert       = request->cacert,
+        .cert_bundle_attach = request->cert_bundle_attach,
+        .host         = NULL,
+        .port         = 0,
+        .region       = region_str,
+        .env          = iot_env_to_string(request->env),
+        .uuid         = request->uuid,
+        .config       = dns_keys,
+        .config_count = 1,
+    };
+    iot_dns_url_config_response_t dns_resp = {0};
+    int ret = iot_dns_url_config(pal, &dns_req, &dns_resp);
+    if (ret != OPRT_OK) {
+        IOT_LOGE("iot_get_qrcode_info: iot_dns_url_config failed: %d", ret);
+        return ret;
+    }
+
+    char host[64] = {0};
+    uint16_t port = IOT_DEFAULT_PORT;
+    for (int i = 0; i < dns_resp.endpoint_count; i++) {
+        if (strcmp(dns_resp.endpoints[i].key, IOT_DNS_KEY_HTTPS) == 0) {
+            parse_host_port(dns_resp.endpoints[i].addr, host, sizeof(host), &port);
+            break;
+        }
+    }
+    iot_dns_url_config_response_free(pal, &dns_resp);
+
+    if (host[0] == '\0') {
+        IOT_LOGE("iot_get_qrcode_info: %s not found in DNS response", IOT_DNS_KEY_HTTPS);
+        return OPRT_COMMUNICATION_ERROR;
+    }
+
+    qrcode_info_request_t req = {
+        .uuid    = request->uuid,
+        .authkey = request->authkey,
+        .app_id  = request->app_id,
+        .type    = request->type,
+        .host    = host,
+        .port    = port,
+        .cacert  = request->cacert,
+        .cert_bundle_attach = request->cert_bundle_attach,
+    };
+
+    qrcode_info_response_t resp = {0};
+    ret = atop_qrcode_info_get(pal, &req, &resp);
+    if (ret != OPRT_OK) {
+        IOT_LOGE("atop_qrcode_info_get failed: %d", ret);
+        return ret;
+    }
+
+    size_t resp_url_len = strlen(resp.short_url);
+    if (resp_url_len >= url_len) {
+        IOT_LOGE("url buffer too small: need %zu, have %zu", resp_url_len + 1, url_len);
+        pal->free(resp.short_url);
+        return OPRT_INVALID_RESULT;
+    }
+    memcpy(url, resp.short_url, resp_url_len);
+    url[resp_url_len] = '\0';
+    pal->free(resp.short_url);
+    return OPRT_OK;
+}
