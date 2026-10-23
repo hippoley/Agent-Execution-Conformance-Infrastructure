@@ -1,0 +1,100 @@
+---
+title: 系统架构
+sidebar_label: 架构
+sidebar_position: 2
+slug: /architecture
+---
+
+import archImg from './images/agentic-architecture.png';
+
+<head>
+  <style>{`
+    .arch-diagram { margin: 1.5rem 0; overflow-x: auto; }
+    .arch-diagram img { display: block; margin: 0 auto; max-width: 100%; height: auto; }
+    .arch-table th { background: #f6f8fa; }
+    .arch-table tr:nth-child(even) { background: #f9fafb; }
+  `}</style>
+</head>
+
+# 系统架构
+
+Agentic-kit 是 AI 智能设备的端侧 SDK，负责设备与涂鸦云平台之间的 IoT 管理和 AI 实时通信。
+
+<div className="arch-diagram">
+  <img src={archImg} alt="Agentic-kit 系统架构图" />
+</div>
+
+## 模块说明 {#模块说明}
+
+### IoT 通信模块 {#iot-通信模块}
+
+负责设备与涂鸦 IoT Core 的连接与管理：
+
+<table className="arch-table">
+  <thead><tr><th>模块</th><th>头文件</th><th>协议</th><th>职责</th></tr></thead>
+  <tbody>
+    <tr><td><strong>iot-client</strong></td><td><code>iot_client.h</code></td><td>HTTP / MQTT</td><td>设备激活、MQTT 长连接、会话令牌获取、数据点上报</td></tr>
+    <tr><td><strong>tuya-ble</strong></td><td><code>tuya_ble_prov.h</code></td><td>BLE</td><td>蓝牙配网</td></tr>
+  </tbody>
+</table>
+
+### RTC 通信模块 {#rtc-通信模块}
+
+负责设备与 AI Foundation 的实时音视频通信：
+
+<table className="arch-table">
+  <thead><tr><th>模块</th><th>头文件</th><th>协议</th><th>职责</th></tr></thead>
+  <tbody>
+    <tr><td><strong>rtc-tcp-client</strong></td><td><code>tuya_ai.h</code></td><td>tRTC (TCP)</td><td>AI 实时交互，源码级集成，PAL 可移植</td></tr>
+    <tr><td><strong>rtc-client</strong></td><td><code>stm_open.h</code></td><td>tRTC (UDP)</td><td>AI 实时交互，预编译库形式，支持多平台</td></tr>
+  </tbody>
+</table>
+
+### 公共组件 / common {#公共组件--common}
+
+被 IoT 与 RTC 两条协议栈共享的底层基础库。此前各模块各自维护的 TLS 实现已统一收敛到此处（如 rtc-tcp-client 的 `src/tai_tls.c` 已删除）：
+
+<table className="arch-table">
+  <thead><tr><th>组件</th><th>源文件</th><th>职责</th></tr></thead>
+  <tbody>
+    <tr><td><strong>共享 TLS</strong></td><td><code>common/tls.c</code></td><td>基于 mbedTLS 的 TLS-over-TCP 传输层，由 IoT（MQTT / HTTP）与 RTC（rtc-tcp-client）两栈共用</td></tr>
+    <tr><td><strong>共享 RNG</strong></td><td><code>common/rng.c</code></td><td>进程级唯一的 CTR-DRBG 随机数发生器，在启动时一次性播种，供全 SDK 复用</td></tr>
+    <tr><td><strong>日志门面</strong></td><td><code>common/log.h</code>、<code>common/log.c</code></td><td>全 SDK 编译期日志级别与分发（<code>AGENTIC_KIT_LOG_LEVEL</code> / <code>AGENTIC_KIT_LOG</code>），见《编译期配置》</td></tr>
+  </tbody>
+</table>
+
+## 项目结构 {#项目结构}
+
+```
+├── modules/                # SDK 模块源码/库
+│   ├── rtc-tcp-client/     # tRTC（Tuya 自研 RTC 协议）TCP 实现（源码）
+│   │   ├── include/tuya_ai.h
+│   │   └── src/
+│   ├── rtc-client/         # tRTC（Tuya 自研 RTC 协议）UDP 实现（预编译库）
+│   │   ├── include/stm_open.h
+│   │   └── libs/
+│   ├── iot-client/         # IoT 客户端（激活、MQTT、token）
+│   │   ├── include/iot_client.h
+│   │   └── src/
+│   └── tuya-ble/           # BLE 配网模块
+├── examples/
+│   ├── posix/              # macOS/Linux 示例
+│   │   ├── ai/
+│   │   │   ├── rtc-tcp-client/    # 使用 rtc-tcp-client 的语音聊天
+│   │   │   └── rtc-client/        # 使用 rtc-client 的语音聊天
+│   │   ├── pair/
+│   │   │   ├── scan-by-device/    # 设备扫码配网
+│   │   │   ├── scan-by-app/       # App 扫码配网
+│   │   │   └── api-activate/      # OpenAPI 激活
+│   │   └── res/                   # 测试资源文件
+│   └── esp-idf/            # ESP-IDF 示例
+│       ├── ai/
+│       │   └── rtc-tcp-client/    # ESP32 语音聊天
+│       └── pair/
+│           ├── pair-by-ble/       # BLE 蓝牙配网
+│           └── scan-by-app/       # App 扫码配网
+├── pal/                    # Platform Abstraction Layer
+├── common/                 # 公共工具代码
+├── third_party/            # 第三方库（mbedtls 等）
+└── docs-site/              # 本文档站点
+```

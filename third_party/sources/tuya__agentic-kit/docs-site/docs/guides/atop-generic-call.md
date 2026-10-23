@@ -1,0 +1,147 @@
+---
+title: 调用未封装的云端接口（ATOP 通用入口）
+sidebar_label: ATOP 通用调用
+sidebar_position: 8
+---
+
+# 调用未封装的云端接口
+
+设备与涂鸦云之间的 HTTP 接口统称 **ATOP 接口**，由 `api` 名和 `version` 两个字段唯一确定，例如 `tuya.device.upgrade.get` v4.4。
+
+SDK 为其中一部分接口提供了**具名接口**（`iot_ota_*`、`iot_dp_*` 等），返回类型化的结构体。云端可调的 ATOP 接口远多于此，为了不让业务被 SDK 的排期卡住，SDK 提供一个**通用入口** `iot_atop_call()`：你给出 `api`、`version` 和 JSON 请求体，拿回 `result` 字段的 JSON 字符串。
+
+签名、请求体 AES-GCM 加密、TLS、host 解析、信封解析都在 SDK 内部完成，**设备密钥不会离开 SDK**。
+
+## 先确认有没有具名接口 {#先确认有没有具名接口}
+
+已经封装好的接口不要用通用入口重新实现——它们额外处理了云端返回的各种变体，并且有单测覆盖：
+
+| ATOP api | version | 具名接口 |
+| --- | --- | --- |
+| `tuya.device.upgrade.get` | 4.4 | `iot_ota_check_upgrade()` |
+| `tuya.device.versions.update` | 4.1 | `iot_ota_report_version()` |
+| `tuya.device.upgrade.status.update` | 4.1 | `iot_ota_report_status()` |
+| `tuya.device.schema.newest.get` | 1.0 | DP 层内部自动查询 |
+| `thing.ai.agent.token.get` | 1.0 | `iot_client_get_session_token()` |
+| `tuya.device.qrcode.info.get` | 1.1 | `iot_get_qrcode_info()` |
+| `thing.device.opensdk.active` | 2.0 | `iot_client_init_on_boarding()` |
+| `tuya.device.meta.save` | 1.0 | 激活流程内部调用 |
+| `tuya.device.info.sync` | 1.0 | `iot_get_binding_status()`，无需 client 的绑定状态查询 |
+
+`iot_get_binding_status(&request, &status)` 返回 `IOT_BINDING_STATUS_BOUND`（仍绑定）、
+`IOT_BINDING_STATUS_UNBOUND`（已解绑）或 `IOT_BINDING_STATUS_FACTORY_RESET`（云端要求恢复出厂设置）。
+只有返回 `OPRT_OK` 时才读取 `status`；云端未提供可识别的 `status` 时返回
+`OPRT_INVALID_RESULT`，云端拒绝或网络失败时返回对应错误码。调用会阻塞等待 HTTPS 响应，
+请从应用主循环调用；清除本地凭证和重新配网由应用负责。
+
+这个接口只需要先调用 `iot_init()` 或 `iot_init_default()`，再提供已保存的 `devid` 和
+`secret_key`，无需 `iot_client_t`、MQTT 连接或 `local_key`。因此 client 初始化失败时也能查询：
+
+```c
+iot_binding_status_request_t request = {
+    .devid = saved_devid,
+    .secret_key = saved_secret_key,
+    .region = AY,
+    .env = PROD,
+    .cacert = ca_certificate,
+};
+iot_binding_status_t status;
+int rc = iot_get_binding_status(&request, &status);
+```
+
+默认直接使用对应区域的 ATOP 域名，不查询 IoT-DNS；也可以通过 `host`（不带协议头的域名）和
+`port` 指定端点。已有 client 时可用 `iot_client_get_binding_status(client, &status)` 复用其已解析的
+端点和 TLS 配置。首次激活尚未返回设备凭证时，只有 `uuid / authkey` 仍无法调用此接口。
+
+## 什么时候该要一个具名接口 {#什么时候该要一个具名接口}
+
+通用入口是逃生通道，不是首选。满足下面**任意一条**时，这个接口值得进 SDK 变成具名接口，欢迎提 issue：
+
+- **多产品复用** —— 两个以上产品线都要调。否则等于把单个产品的业务逻辑塞进 SDK。
+- **协议语义不平凡** —— 有状态机、多步时序，或者云端返回形态需要宽容解析。这类知识重复实现必然出偏差。
+- **需要参与 SDK 内部状态** —— 要改 `iot_client_t` 的字段或触发 SDK 回调。业务层拿不到内部状态，物理上只能在 SDK 里做。
+
+三条都不满足的接口，留在业务层用通用入口调是合适的终态，不是技术债。
+
+## API {#api}
+
+```c
+#include "iot_atop.h"
+
+typedef struct {
+    const char *api;      /* 例 "tuya.device.upgrade.get"，必填 */
+    const char *version;  /* 例 "4.4"，必填 */
+    const char *data;     /* 请求体，JSON 对象字符串；NULL 或 "" 视为 "{}" */
+} iot_atop_request_t;
+
+typedef struct {
+    char *result;            /* result 字段的 JSON 字符串；云端没返回则为 NULL */
+    char  error_code[48];    /* 云端 errorCode；成功时为 "" */
+    char  error_msg[128];    /* 云端 errorMsg；成功时为 "" */
+    int32_t server_time;     /* 信封里的服务器时间 t */
+} iot_atop_response_t;
+
+int  iot_atop_call(iot_client_t *client,
+                   const iot_atop_request_t *request,
+                   iot_atop_response_t *response);
+void iot_atop_response_free(iot_client_t *client, iot_atop_response_t *response);
+```
+
+## 示例 {#示例}
+
+```c
+#include "iot_atop.h"
+
+uint32_t timestamp = (uint32_t)(client->pal->wal_clock_time() / 1000U);
+char body[192];
+snprintf(body, sizeof(body),
+         "{\"schemaId\":\"%s\",\"version\":\"\",\"t\":%u}",
+         schema_id, (unsigned)timestamp);
+
+iot_atop_request_t  req  = { .api     = "tuya.device.schema.newest.get",
+                             .version = "1.0",
+                             .data    = body };
+iot_atop_response_t resp = {0};
+
+/* 出错路径用 SDK 公共日志门面 log_tag_*（应用代码可直接调用，与 SDK 日志同一编译期上限与分发） */
+int rc = iot_atop_call(client, &req, &resp);
+if (rc == OPRT_OK) {
+    if (resp.result != NULL) {
+        my_parse(resp.result);          /* result 是 JSON 文本，用什么库解析都行 */
+    }
+} else if (rc == OPRT_ATOP_BUSINESS_ERROR) {
+    /* 请求到达了云端，被云端拒绝 —— error_code 说明原因 */
+    log_tag_error("app", "rejected: %s (%s)", resp.error_code, resp.error_msg);
+} else {
+    /* 传输层失败：DNS / TLS / HTTP / 解密 */
+    log_tag_error("app", "call failed: %d", rc);
+}
+
+iot_atop_response_free(client, &resp);   /* 每条路径都要调，包括失败路径 */
+```
+
+## 返回值：区分"云端拒绝"和"没连上" {#返回值区分云端拒绝和没连上}
+
+这是使用通用入口时最重要的一点。你调的接口 SDK 并不认识，所以 SDK 无法替你判断业务是否成功，**云端自己的 errorCode 是唯一可靠的线索**：
+
+| 返回值 | 含义 | 怎么处理 |
+| --- | --- | --- |
+| `OPRT_OK` | 云端接受了这次调用 | `result` 是结果 JSON，或 NULL（云端没返回 result，这是合法的） |
+| `OPRT_ATOP_BUSINESS_ERROR` | 到达了云端，被云端拒绝 | 看 `error_code` / `error_msg`，按你的接口文档处理 |
+| `OPRT_INVALID_PARAMETER` | 参数不对，或 `data` 不是 JSON 对象 | 本地就拦下了，没发网络请求 |
+| `OPRT_UNINITIALIZED` | 设备还没有激活凭据 | 先完成激活 |
+| 其他 | 传输层失败（DNS / TLS / HTTP / 解密） | 可重试 |
+
+`error_code[0] == '\0'` 等价于"业务成功"。
+
+## 限制 {#限制}
+
+**只支持已激活的设备。** 通用入口用 `devid` + `secret_key` 签名。激活本身用的是 `uuid` + `authkey`，是另一条路径，仍然只能通过 `iot_client_init_on_boarding()` 走。在没有凭据的 client 上调用返回 `OPRT_UNINITIALIZED`。
+
+**单次响应不能超过 4096 字节，连 HTTP 头一起算。** 状态行、响应头和加密后的响应体共用一个固定大小的缓冲区（`AGENTIC_KIT_RESPONSE_BUFFER_SIZE`，默认值与调整说明见 `modules/iot-client/include/iot_client_config_defaults.h`），没有分段续读。溢出时底层 coreHTTP 返回 `HTTPInsufficientMemory`，SDK 把它折叠成 `OPRT_COMMUNICATION_ERROR`——和"socket 断了"是同一个返回值，而 coreHTTP 自己的解释性日志在本项目里被编译掉了（`HTTP_DO_NOT_USE_CUSTOM_CONFIG`），所以现场只看得到一次"传输层失败"，重试也不会好。扣掉响应头、base64 膨胀和信封字段，**解密后 JSON 的实际上限约 2.8 KB**。返回定长字段的接口绰绰有余；返回列表、DP schema 这类长度随产品增长的接口很容易撞上——遇到这种接口请提 issue，把它变成具名接口的同一个改动里需要把这个常量一起抬上去。
+
+**请求体原样透传。** SDK 不会改写你的请求体，所以接口要求的字段必须自己带齐——**包括大多数 ATOP 接口在请求体里要求的 `t` 时间戳字段**。SDK 只校验到"能解析成 JSON 对象"为止，目的是把手误变成一个立刻返回的 `OPRT_INVALID_PARAMETER`，而不是花一次 HTTPS 往返换一句含义模糊的云端拒绝。
+
+**`result` 是字符串，不是 cJSON 对象。** 这样 cJSON 不会进入 SDK 的公共 ABI，业务层不必绑定 SDK 的 cJSON 版本，内存归属也清晰：`iot_atop_response_free()` 负责释放。
+
+**设备时钟要基本准确。** 签名带时间戳，设备时间偏差过大云端会拒签。`resp.server_time` 是云端返回的时间（秒级 Unix 时间戳），可以用来校正本地时钟。
