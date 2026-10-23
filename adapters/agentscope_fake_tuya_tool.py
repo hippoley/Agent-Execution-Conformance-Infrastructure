@@ -49,7 +49,7 @@ class FakeTuyaLampTool(ToolBase):
         return PermissionDecision(behavior=PermissionBehavior.ALLOW, message='Explicitly enabled loopback-only test tool')
 
     def _request(self, path: str, command=None):
-        data = json.dumps(command).encode("utf-8") if command is not None else None
+        data = json.dumps(command, separators=(",", ":"), ensure_ascii=False).encode("utf-8") if command is not None else None
         req = Request(self.base_url + path, data=data, headers={
             "Authorization": f"Bearer {self.token}",
             **({"Content-Type": "application/json"} if data else {}),
@@ -93,6 +93,10 @@ class FakeTuyaLampTool(ToolBase):
         return {"status": "UNKNOWN_RECONCILIATION_REQUIRED", "command_id": command_id}
 
     async def call(self, on: bool):
+        # Toolkit.call_tool is a low-level execution API: it does not itself
+        # invoke the Agent permission engine. Always fail closed here too.
+        if not self.allow_test_execution:
+            return ToolChunk(content=[TextBlock(text='{"status":"DENIED_BY_TEST_GATE"}')], state=ToolResultState.DENIED)
         if type(on) is not bool:
             return ToolChunk(content=[TextBlock(text='{"status":"INVALID_ARGUMENTS"}')], state=ToolResultState.ERROR)
         result = await asyncio.to_thread(self._execute, on)
