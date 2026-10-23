@@ -1,0 +1,663 @@
+#include "mqtt.h"
+/* Transport knob defaults (AGENTIC_KIT_MQTT_MAX_PACKET_SIZE etc.) live in
+ * include/iot_client_config_defaults.h. */
+#include "iot_internal.h"
+
+#include <stdlib.h>
+#include <string.h>
+#include <stdio.h>
+#include <unistd.h>
+
+#include "core_mqtt.h"
+
+// Shared TLS transport (mbedTLS lives entirely inside common/tls).
+#include "tls.h"
+
+// Network context structure definition with TLS support
+struct NetworkContext {
+    void *tcp_handle;
+    bool use_tls;
+    tls_t *tls;                  // NULL when use_tls is false
+    struct mqtt_client *client;  // Pointer to parent mqtt_client for callback access
+};
+
+#define MAX_BROKER_HOST_LEN 64
+#define MAX_CLIENT_ID_LEN   32
+#define MAX_USERNAME_LEN    32
+#define MAX_PASSWORD_LEN    20
+#define MAX_TOPIC_LEN       64
+#define MQTT_QOS_RECORD_COUNT 4
+
+// MQTT client structure
+struct mqtt_client {
+    MQTTContext_t mqtt_context;
+    NetworkContext_t network_context;
+    TransportInterface_t transport;
+    MQTTFixedBuffer_t fixed_buffer;
+    uint8_t *buffer;
+
+    // QoS1 and QoS2 publish records
+    MQTTPubAckInfo_t incoming_publish_records[MQTT_QOS_RECORD_COUNT];
+    MQTTPubAckInfo_t outgoing_publish_records[MQTT_QOS_RECORD_COUNT];
+
+    char broker_host[MAX_BROKER_HOST_LEN];
+    int broker_port;
+    char client_id[MAX_CLIENT_ID_LEN];
+    char username[MAX_USERNAME_LEN];
+    char password[MAX_PASSWORD_LEN];
+    char subscribe_topic[MAX_TOPIC_LEN];
+    mqtt_message_callback_t message_callback;
+    void *user_data;
+    bool connected;
+    /* Set when the link is known dead (a failed process loop). Kept separate
+     * from `connected`, which still gates the teardown below: clearing that
+     * instead would make mqtt_client_disconnect() return early and leak the TLS
+     * context and the MQTT buffer. */
+    bool link_dead;
+    bool use_tls;
+    const char *cacert;
+    tls_cert_bundle_attach_fn cert_bundle_attach;
+    const pal_t *pal;
+
+    // SUBACK tracking
+    volatile int suback_status;
+};
+
+static uint64_t (*s_timestamp_ms_func)(void) = NULL;
+
+static uint32_t mqtt_get_time_ms(void) {
+    if (s_timestamp_ms_func) {
+        return (uint32_t)s_timestamp_ms_func();
+    }
+    return 0;
+}
+
+static int32_t transport_send(NetworkContext_t *pNetworkContext,
+                              const void *pBuffer,
+                              size_t bytesToSend) {
+    if (!pNetworkContext) {
+        return OPRT_UNINITIALIZED;
+    }
+
+    if (pNetworkContext->use_tls) {
+        int r = tls_write(pNetworkContext->tls, (const uint8_t *)pBuffer,
+                          bytesToSend, 30000 /* 30s */);
+        if (r != TLS_OK) {
+            IOT_LOGE("TLS write error");
+            return OPRT_COMMUNICATION_ERROR;
+        }
+        return (int32_t)bytesToSend;
+    } else {
+        if (!pNetworkContext->tcp_handle) {
+            return OPRT_COMMUNICATION_ERROR;
+        }
+        int bytes_sent = pNetworkContext->client->pal->tcp_send(
+            pNetworkContext->tcp_handle, (const uint8_t *)pBuffer, bytesToSend,
+            AGENTIC_KIT_MQTT_SEND_TIMEOUT_MS);
+        if (bytes_sent == PAL_ERR_AGAIN) {
+            return 0;
+        }
+        if (bytes_sent < 0) {
+            IOT_LOGE("TCP send failed: %d", bytes_sent);
+            return OPRT_COMMUNICATION_ERROR;
+        }
+        return (int32_t)bytes_sent;
+    }
+}
+
+// Transport interface receive function (supports both TCP and TLS)
+static int32_t transport_recv(NetworkContext_t *pNetworkContext,
+                              void *pBuffer,
+                              size_t bytesToRecv) {
+    if (!pNetworkContext) {
+        return OPRT_UNINITIALIZED;
+    }
+
+    if (pNetworkContext->use_tls) {
+        int n = tls_read(pNetworkContext->tls, (uint8_t *)pBuffer, bytesToRecv,
+                         AGENTIC_KIT_MQTT_RECV_TIMEOUT_MS);
+        if (n == TLS_ERR_AGAIN) {
+            return OPRT_OK;   // no data within timeout: coreMQTT polls again
+        }
+        if (n <= 0) {
+            // n<0: TLS error. n==0: graceful peer close_notify — tls_read maps
+            // no-data to TLS_ERR_AGAIN, so 0 here always means the peer closed.
+            // Must surface as an error: returning 0 would look like an idle poll
+            // and the dead link would only be noticed at the keepalive timeout.
+            IOT_LOGE("TLS read error/closed (n=%d)", n);
+            return OPRT_COMMUNICATION_ERROR;
+        }
+        return n;   // >0 bytes
+    } else {
+        if (!pNetworkContext->tcp_handle) {
+            return OPRT_COMMUNICATION_ERROR;
+        }
+        int bytes_received = pNetworkContext->client->pal->tcp_recv(
+            pNetworkContext->tcp_handle, (uint8_t *)pBuffer, bytesToRecv,
+            AGENTIC_KIT_MQTT_RECV_TIMEOUT_MS);
+        if (bytes_received == PAL_ERR_AGAIN) {
+            return OPRT_OK;
+        }
+        if (bytes_received < 0) {
+            IOT_LOGE("TCP recv failed: %d", bytes_received);
+            return OPRT_COMMUNICATION_ERROR;
+        }
+        if (bytes_received == 0) {
+            /* 0 is EOF per the PAL contract (pal.h) -- the peer closed. Same
+             * reasoning as the TLS branch above: handing coreMQTT a 0 reads as
+             * an idle poll, so a dropped link would go unnoticed until the
+             * 60 s keepalive expired. This branch used to be the asymmetric
+             * one; only mqtt_disable_tls=true builds ever reached it. */
+            IOT_LOGE("TCP peer closed the connection");
+            return OPRT_COMMUNICATION_ERROR;
+        }
+        return (int32_t)bytes_received;
+    }
+}
+
+// Parse broker URL (tcp://host:port)
+static int parse_broker_url(const char *url, char *host, int *port) {
+    const char *host_start = strstr(url, "://");
+    if (!host_start) {
+        return OPRT_INVALID_PARAMETER;
+    }
+    host_start += 3;
+
+    const char *port_start = strchr(host_start, ':');
+    if (!port_start) {
+        return OPRT_INVALID_PARAMETER;
+    }
+
+    size_t host_len = port_start - host_start;
+    if (host_len >= MAX_BROKER_HOST_LEN) {
+        return OPRT_INVALID_PARAMETER;
+    }
+
+    strncpy(host, host_start, host_len);
+    host[host_len] = '\0';
+
+    *port = atoi(port_start + 1);
+    return OPRT_OK;
+}
+
+// Establish TCP connection to broker (non-TLS)
+static void *connect_to_broker(mqtt_client *client) {
+    void *handle = client->pal->tcp_connect(client->broker_host, (uint16_t)client->broker_port,
+                                            AGENTIC_KIT_MQTT_CONNECT_TIMEOUT_MS);
+    if (!handle) {
+        IOT_LOGE("Failed to connect to broker %s:%d", client->broker_host, client->broker_port);
+        return NULL;
+    }
+    IOT_LOGI("TCP connection established to %s:%d", client->broker_host, client->broker_port);
+    return handle;
+}
+
+// Returns: OPRT_OK on success, OPRT_TLS_HANDSHAKE_FAILED on failure.
+static int connect_to_broker_tls(NetworkContext_t *network_ctx, const char *host, int port,
+                                 const char *cacert, tls_cert_bundle_attach_fn cert_bundle_attach) {
+    bool has_cacert = (cacert && cacert[0] != '\0');
+    if (!has_cacert && !cert_bundle_attach) {
+        IOT_LOGW("No CA certificate provided - server verification disabled");
+    }
+
+    tls_config_t cfg = {
+        .host         = host,
+        .port         = (uint16_t)port,
+        .sni          = host,
+        .cacert       = has_cacert ? cacert : NULL,
+        .cert_bundle_attach = cert_bundle_attach,
+        .verify       = TLS_VERIFY_NONE,   // no CA -> no verification (legacy behaviour)
+        .force_tls12  = true,
+        .ciphersuites = tls_ciphersuites_tuya_default(),
+        .connect_timeout_ms = AGENTIC_KIT_MQTT_CONNECT_TIMEOUT_MS,
+        .pal          = network_ctx->client->pal,
+    };
+
+    network_ctx->tls = tls_connect(&cfg);
+    if (!network_ctx->tls) {
+        IOT_LOGE("Failed to establish TLS connection to %s:%d", host, port);
+        return OPRT_TLS_HANDSHAKE_FAILED;
+    }
+    network_ctx->use_tls = true;
+    IOT_LOGI("TLS connection established to %s:%d", host, port);
+    return OPRT_OK;
+}
+
+static void tls_cleanup(NetworkContext_t *ctx)
+{
+    if (!ctx->tls) {
+        return;
+    }
+    tls_close(ctx->tls);   // sends close_notify, closes the socket, frees state
+    ctx->tls = NULL;
+    ctx->tcp_handle = NULL;
+}
+
+static void mqtt_event_callback(MQTTContext_t *pMqttContext,
+                                MQTTPacketInfo_t *pPacketInfo,
+                                MQTTDeserializedInfo_t *pDeserializedInfo) {
+    NetworkContext_t *pNetworkContext = (NetworkContext_t *)pMqttContext->transportInterface.pNetworkContext;
+    if (!pNetworkContext || !pNetworkContext->client) {
+        IOT_LOGW("mqtt_event_callback: invalid network context");
+        return;
+    }
+
+    mqtt_client *client = pNetworkContext->client;
+
+    IOT_LOGD("MQTT event callback: packet type = 0x%02X", pPacketInfo->type);
+
+    if ((pPacketInfo->type & 0xF0U) == MQTT_PACKET_TYPE_PUBLISH) {
+        MQTTPublishInfo_t *pPublish = pDeserializedInfo->pPublishInfo;
+        IOT_LOGI("Received PUBLISH: topic=%.*s, payload_len=%u",
+                 (int)pPublish->topicNameLength, pPublish->pTopicName, (unsigned)pPublish->payloadLength);
+        if (client->message_callback) {
+            client->message_callback(pPublish->pTopicName, pPublish->topicNameLength,
+                                   pPublish->pPayload, pPublish->payloadLength,
+                                   client->user_data);
+        }
+    } else if (pPacketInfo->type == MQTT_PACKET_TYPE_SUBACK) {
+        // Parse SUBACK: remaining data contains packet_id (2 bytes) + return codes
+        // pPacketInfo->pRemainingData points to variable header + payload
+        if (pPacketInfo->remainingLength >= 3) {
+            // Skip packet ID (2 bytes), get first return code
+            uint8_t return_code = pPacketInfo->pRemainingData[2];
+            if (return_code == 0x80) {
+                IOT_LOGE("Received SUBACK with failure code 0x%02X", return_code);
+                client->suback_status = return_code;
+            } else {
+                IOT_LOGI("Received SUBACK with granted QoS %d", return_code);
+                client->suback_status = 0;
+            }
+        } else {
+            IOT_LOGW("Received SUBACK with invalid length");
+            client->suback_status = 0x80;
+        }
+    } else if (pPacketInfo->type == MQTT_PACKET_TYPE_PUBACK) {
+        IOT_LOGD("Received PUBACK");
+    }
+}
+
+// Create MQTT client with full configuration
+mqtt_client *mqtt_client_create_with_config(const mqtt_client_config_t *config) {
+    if (!config) {
+        IOT_LOGE("Invalid parameters for MQTT client creation");
+        return NULL;
+    }
+    if (!config->pal) {
+        IOT_LOGE("mqtt_client_create_with_config: config->pal is NULL");
+        return NULL;
+    }
+    if (!config->broker_url || !config->client_id ||
+        !config->password || !config->subscribe_topic) {
+        IOT_LOGE("Invalid parameters for MQTT client creation");
+        return NULL;
+    }
+
+    const pal_t *pal = config->pal;
+    mqtt_client *client = (mqtt_client *)pal->malloc(sizeof(mqtt_client));
+    if (!client) {
+        IOT_LOGE("Failed to allocate memory for MQTT client");
+        return NULL;
+    }
+    memset(client, 0, sizeof(mqtt_client));
+    client->pal = pal;
+
+    // Parse broker URL
+    if (parse_broker_url(config->broker_url, client->broker_host, &client->broker_port) != 0) {
+        IOT_LOGE("Failed to parse broker URL: %s", config->broker_url);
+        client->pal->free(client);
+        return NULL;
+    }
+
+    // Detect if TLS should be used
+    client->use_tls = (strncmp(config->broker_url, "mqtts://", 8) == 0 ||
+                       strncmp(config->broker_url, "ssl://", 6) == 0);
+
+    if (client->use_tls) {
+        if (config->tls_config && config->tls_config->cacert && config->tls_config->cacert[0] != '\0') {
+            client->cacert = config->tls_config->cacert;
+            IOT_LOGI("TLS enabled with CA cert PEM");
+        } else {
+            client->cacert = NULL;
+            if (config->tls_config && config->tls_config->cert_bundle_attach) {
+                IOT_LOGI("TLS enabled with platform cert bundle");
+            } else {
+                IOT_LOGW("TLS enabled without CA certificate - server verification disabled");
+            }
+        }
+        if (config->tls_config)
+            client->cert_bundle_attach = config->tls_config->cert_bundle_attach;
+    }
+
+    // Copy client configuration
+    strncpy(client->client_id, config->client_id, sizeof(client->client_id) - 1);
+    client->client_id[sizeof(client->client_id) - 1] = '\0';
+    // Use separate username if provided, otherwise use client_id
+    if (config->username && strlen(config->username) > 0) {
+        strncpy(client->username, config->username, sizeof(client->username) - 1);
+    } else {
+        strncpy(client->username, config->client_id, sizeof(client->username) - 1);
+    }
+    client->username[sizeof(client->username) - 1] = '\0';
+    strncpy(client->password, config->password, sizeof(client->password) - 1);
+    client->password[sizeof(client->password) - 1] = '\0';
+    strncpy(client->subscribe_topic, config->subscribe_topic, sizeof(client->subscribe_topic) - 1);
+    client->subscribe_topic[sizeof(client->subscribe_topic) - 1] = '\0';
+    client->message_callback = config->callback;
+    client->user_data = config->user_data;
+    client->connected = false;
+
+    // Buffer is lazy-allocated on connect to avoid 4 KB inline footprint
+    client->buffer = NULL;
+    client->fixed_buffer.pBuffer = NULL;
+    client->fixed_buffer.size = 0;
+
+    // Setup transport interface
+    client->transport.send = transport_send;
+    client->transport.recv = transport_recv;
+    client->transport.pNetworkContext = &client->network_context;
+    IOT_LOGI("MQTT client created for broker %s:%d (TLS: %s), clientId: %s, username: %s",
+             client->broker_host, client->broker_port, client->use_tls ? "yes" : "no",
+             client->client_id, client->username);
+    return client;
+}
+
+// Release the lazy MQTT fixed buffer; safe to call when buffer is already NULL.
+static void release_mqtt_buffer(mqtt_client *client) {
+    if (!client->buffer) {
+        return;
+    }
+    client->pal->free(client->buffer);
+    client->buffer = NULL;
+    client->fixed_buffer.pBuffer = NULL;
+    client->fixed_buffer.size = 0;
+}
+
+/* Record what an MQTTStatus says about the transport underneath, for the
+ * DISCONNECT-suppression check in mqtt_client_disconnect().
+ *
+ * Only these three mean the socket is gone. MQTTBadResponse (a malformed packet
+ * arrived) and MQTTIllegalState (QoS bookkeeping hit an impossible state) are
+ * protocol faults on a perfectly healthy socket -- suppressing the DISCONNECT
+ * for those strands the session on the broker until the 60 s keepalive expires,
+ * and since the clientId is the devid, the next reconnect races that stale
+ * session.
+ *
+ * A completed exchange clears the flag again, which matters just as much: the
+ * flag is read at teardown, possibly long after the failure, so latch-only
+ * would let one transient error the caller retried past suppress the DISCONNECT
+ * for the rest of a demonstrably live session -- the same race from the other
+ * end. Every call site reports its status, success included. */
+static void mqtt_note_transport_state(mqtt_client *client, MQTTStatus_t status)
+{
+    if (status == MQTTRecvFailed || status == MQTTSendFailed ||
+        status == MQTTKeepAliveTimeout) {
+        client->link_dead = true;
+    } else if (status == MQTTSuccess || status == MQTTNeedMoreBytes) {
+        client->link_dead = false;
+    }
+}
+
+/* Unwind a half-built connection: drop the transport, hand back the MQTT buffer.
+ * Shared by the three failure points that sit between a live socket and a usable
+ * MQTT session (Init, InitStatefulQoS, Connect), which were three byte-identical
+ * copies -- a fix applied to one of them could silently miss the other two.
+ * Returns the error so each site stays a single `return`. */
+static int mqtt_abort_connect(mqtt_client *client)
+{
+    if (client->use_tls) {
+        tls_cleanup(&client->network_context);
+    } else {
+        client->pal->tcp_close(client->network_context.tcp_handle);
+        client->network_context.tcp_handle = NULL;
+    }
+    release_mqtt_buffer(client);
+    return OPRT_COMMUNICATION_ERROR;
+}
+
+// Connect to MQTT broker
+int mqtt_client_connect(mqtt_client *client) {
+    if (!client) {
+        return OPRT_INVALID_PARAMETER;
+    }
+
+    s_timestamp_ms_func = client->pal->time_ms;
+
+    // Allocate the MQTT fixed buffer on demand (freed on disconnect/destroy)
+    if (!client->buffer) {
+        client->buffer = client->pal->malloc(AGENTIC_KIT_MQTT_MAX_PACKET_SIZE);
+        if (!client->buffer) {
+            IOT_LOGE("Failed to allocate MQTT buffer (%u bytes)", AGENTIC_KIT_MQTT_MAX_PACKET_SIZE);
+            return OPRT_MALLOC_FAILED;
+        }
+        client->fixed_buffer.pBuffer = client->buffer;
+        client->fixed_buffer.size = AGENTIC_KIT_MQTT_MAX_PACKET_SIZE;
+    }
+
+    // Set client pointer in network context for callback access
+    client->network_context.client = client;
+
+    // Establish connection (TCP or TLS)
+    if (client->use_tls) {
+        int tls_ret = connect_to_broker_tls(&client->network_context, client->broker_host,
+                                            client->broker_port, client->cacert,
+                                            client->cert_bundle_attach);
+        if (tls_ret != 0) {
+            release_mqtt_buffer(client);
+            return tls_ret;
+        }
+    } else {
+        client->network_context.tcp_handle = connect_to_broker(client);
+        if (!client->network_context.tcp_handle) {
+            release_mqtt_buffer(client);
+            return OPRT_COMMUNICATION_ERROR;
+        }
+        client->network_context.use_tls = false;
+    }
+
+    // Initialize MQTT context
+    MQTTStatus_t status = MQTT_Init(&client->mqtt_context, &client->transport,
+                                    mqtt_get_time_ms, mqtt_event_callback, &client->fixed_buffer);
+    if (status != MQTTSuccess) {
+        IOT_LOGE("MQTT_Init failed: %s (%d)", MQTT_Status_strerror(status), status);
+        return mqtt_abort_connect(client);
+    }
+
+    // Initialize QoS1 and QoS2 support
+    status = MQTT_InitStatefulQoS(&client->mqtt_context,
+                                   client->outgoing_publish_records,
+                                   MQTT_QOS_RECORD_COUNT,
+                                   client->incoming_publish_records,
+                                   MQTT_QOS_RECORD_COUNT);
+    if (status != MQTTSuccess) {
+        IOT_LOGE("MQTT_InitStatefulQoS failed: %s (%d)", MQTT_Status_strerror(status), status);
+        return mqtt_abort_connect(client);
+    }
+    IOT_LOGI("QoS1 and QoS2 support initialized");
+
+    // Setup CONNECT packet
+    MQTTConnectInfo_t connect_info = {0};
+    connect_info.cleanSession = true;
+    connect_info.keepAliveSeconds = 60;
+    connect_info.pClientIdentifier = client->client_id;
+    connect_info.clientIdentifierLength = strlen(client->client_id);
+    connect_info.pUserName = client->username;
+    connect_info.userNameLength = strlen(client->username);
+    connect_info.pPassword = client->password;
+    connect_info.passwordLength = strlen(client->password);
+
+    IOT_LOGI("MQTT CONNECT packet:");
+    IOT_LOGI("  clientId : [%u] %s", (unsigned)connect_info.clientIdentifierLength, connect_info.pClientIdentifier);
+    IOT_LOGI("  username : [%u] %s", (unsigned)connect_info.userNameLength, connect_info.pUserName);
+    IOT_LOGI("  password : [%u] ****", (unsigned)connect_info.passwordLength);
+    IOT_LOGI("  keepAlive: %u s, cleanSession: %d", connect_info.keepAliveSeconds, connect_info.cleanSession);
+
+    bool sessionPresent = false;
+    status = MQTT_Connect(&client->mqtt_context, &connect_info, NULL,
+                         AGENTIC_KIT_MQTT_SEND_TIMEOUT_MS, &sessionPresent);
+
+    if (status != MQTTSuccess) {
+        IOT_LOGE("MQTT_Connect failed: %s (%d)", MQTT_Status_strerror(status), status);
+        return mqtt_abort_connect(client);
+    }
+
+    client->connected = true;
+    client->link_dead = false;
+    IOT_LOGI("Successfully connected to MQTT broker");
+    return OPRT_OK;
+}
+
+// Subscribe to topic
+int mqtt_client_subscribe(mqtt_client *client) {
+    if (!client) {
+        return OPRT_INVALID_PARAMETER;
+    }
+    if (!client->connected) {
+        return OPRT_UNINITIALIZED;
+    }
+
+    MQTTSubscribeInfo_t subscribe_info = {0};
+    subscribe_info.qos = MQTTQoS1;
+    subscribe_info.pTopicFilter = client->subscribe_topic;
+    subscribe_info.topicFilterLength = strlen(client->subscribe_topic);
+
+    // Reset SUBACK status before subscribe
+    client->suback_status = -1;
+
+    uint16_t packet_id = MQTT_GetPacketId(&client->mqtt_context);
+    MQTTStatus_t status = MQTT_Subscribe(&client->mqtt_context, &subscribe_info, 1, packet_id);
+    mqtt_note_transport_state(client, status);
+
+    if (status != MQTTSuccess) {
+        IOT_LOGE("MQTT_Subscribe failed: %s (%d)", MQTT_Status_strerror(status), status);
+        return OPRT_COMMUNICATION_ERROR;
+    }
+
+    IOT_LOGI("Subscribe request sent for topic: %s, waiting for SUBACK...", client->subscribe_topic);
+
+    int retries = 50;
+    while (retries-- > 0) {
+        status = MQTT_ProcessLoop(&client->mqtt_context);
+        mqtt_note_transport_state(client, status);
+        if (status == MQTTSuccess) {
+            if (client->suback_status == 0) {
+                IOT_LOGI("Successfully subscribed to topic: %s", client->subscribe_topic);
+                return OPRT_OK;
+            }
+            if (client->suback_status > 0) {
+                IOT_LOGE("Subscription rejected by broker: code 0x%02X", client->suback_status);
+                return OPRT_COMMUNICATION_ERROR;
+            }
+        } else if (status != MQTTNeedMoreBytes) {
+            IOT_LOGE("MQTT_ProcessLoop failed while waiting for SUBACK: %s (%d)", MQTT_Status_strerror(status), status);
+            return OPRT_COMMUNICATION_ERROR;
+        }
+        usleep(100000);
+    }
+
+    IOT_LOGE("Timeout waiting for SUBACK");
+    return OPRT_COMMUNICATION_ERROR;
+}
+
+// Publish message
+int mqtt_client_publish(mqtt_client *client, const char *topic,
+                        const uint8_t *message, size_t message_len) {
+    if (!client) {
+        return OPRT_INVALID_PARAMETER;
+    }
+    if (!client->connected) {
+        return OPRT_UNINITIALIZED;
+    }
+
+    MQTTPublishInfo_t publish_info = {0};
+    publish_info.qos = MQTTQoS1;
+    publish_info.retain = false;
+    publish_info.pTopicName = topic;
+    publish_info.topicNameLength = strlen(topic);
+    publish_info.pPayload = message;
+    publish_info.payloadLength = message_len;
+
+    MQTTStatus_t status = MQTT_Publish(&client->mqtt_context, &publish_info,
+                                      MQTT_GetPacketId(&client->mqtt_context));
+    mqtt_note_transport_state(client, status);
+
+    if (status != MQTTSuccess) {
+        IOT_LOGE("MQTT_Publish failed: %s (%d)", MQTT_Status_strerror(status), status);
+        return OPRT_COMMUNICATION_ERROR;
+    }
+
+    IOT_LOGD("Published message to topic: %s", topic);
+    return OPRT_OK;
+}
+
+// Process MQTT events
+int mqtt_client_process(mqtt_client *client, uint32_t timeout_ms) {
+    (void)timeout_ms;
+    if (!client) {
+        return OPRT_INVALID_PARAMETER;
+    }
+    if (!client->connected) {
+        return OPRT_UNINITIALIZED;
+    }
+
+    MQTTStatus_t status = MQTT_ProcessLoop(&client->mqtt_context);
+
+    mqtt_note_transport_state(client, status);
+
+    if (status != MQTTSuccess && status != MQTTNeedMoreBytes) {
+        IOT_LOGE("MQTT_ProcessLoop failed: %s (%d)", MQTT_Status_strerror(status), status);
+        return OPRT_COMMUNICATION_ERROR;
+    }
+
+    return OPRT_OK;
+}
+
+// Disconnect
+void mqtt_client_disconnect(mqtt_client *client) {
+    if (!client || !client->connected) {
+        return;
+    }
+
+    /* A DISCONNECT on a link the process loop already found dead cannot arrive.
+     * It is not merely useless: coreMQTT reports the failed send at ERROR level,
+     * so an app reconnecting on a flaky network would log two errors per cycle
+     * for an ordinary teardown. Everything below still runs -- the socket and
+     * buffer must be released either way. */
+    if (!client->link_dead) {
+        MQTT_Disconnect(&client->mqtt_context);
+    }
+
+    if (client->use_tls) {
+        tls_cleanup(&client->network_context);
+    } else {
+        if (client->network_context.tcp_handle) {
+            client->pal->tcp_close(client->network_context.tcp_handle);
+            client->network_context.tcp_handle = NULL;
+        }
+    }
+
+    release_mqtt_buffer(client);
+
+    client->connected = false;
+
+    IOT_LOGI("Disconnected from MQTT broker");
+}
+
+// Destroy client
+void mqtt_client_destroy(mqtt_client *client) {
+    if (!client) {
+        return;
+    }
+
+    if (client->connected) {
+        mqtt_client_disconnect(client);
+    }
+
+    const pal_t *pal = client->pal;
+    pal->free(client);
+}
+
+// Check if connected
+bool mqtt_client_is_connected(mqtt_client *client) {
+    return client && client->connected;
+}
