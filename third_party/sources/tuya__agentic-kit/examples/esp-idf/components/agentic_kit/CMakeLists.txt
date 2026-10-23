@@ -1,0 +1,97 @@
+set(AK_DIR ${CMAKE_CURRENT_LIST_DIR}/../../../..)
+
+set(AK_SRCS
+    # biz-client: typed cloud business services, platform-independent
+    ${AK_DIR}/modules/biz-client/src/biz_client.c
+    ${AK_DIR}/modules/biz-client/src/ai_role.c
+
+    # rtc-tcp-client (TAI 2.1)
+    ${AK_DIR}/modules/rtc-tcp-client/src/tai_attrs.c
+    ${AK_DIR}/modules/rtc-tcp-client/src/tai_client.c
+    ${AK_DIR}/modules/rtc-tcp-client/src/tai_crypto.c
+    ${AK_DIR}/modules/rtc-tcp-client/src/tai_packet.c
+    ${AK_DIR}/modules/rtc-tcp-client/src/tai_pkt_log.c
+    ${AK_DIR}/modules/rtc-tcp-client/src/tai_protocol.c
+    ${AK_DIR}/modules/rtc-tcp-client/src/tai_transport.c
+
+    # iot-client
+    ${AK_DIR}/modules/iot-client/src/atop.c
+    ${AK_DIR}/modules/iot-client/src/atop_base.c
+    ${AK_DIR}/modules/iot-client/src/cipher_wrapper.c
+    ${AK_DIR}/modules/iot-client/src/http_client_interface.c
+    ${AK_DIR}/modules/iot-client/src/iot_ai_ctrl.c
+    ${AK_DIR}/modules/iot-client/src/iot_atop.c
+    ${AK_DIR}/modules/iot-client/src/iot_client.c
+    ${AK_DIR}/modules/iot-client/src/iot_client_message.c
+    ${AK_DIR}/modules/iot-client/src/iot_dns.c
+    ${AK_DIR}/modules/iot-client/src/iot_dp.c
+    ${AK_DIR}/modules/iot-client/src/iot_on_boarding.c
+    ${AK_DIR}/modules/iot-client/src/iot_ota.c
+    ${AK_DIR}/modules/iot-client/src/iot_ota_verify.c
+    ${AK_DIR}/modules/iot-client/src/mqtt.c
+
+    # tuya-ble
+    ${AK_DIR}/modules/tuya-ble/src/tuya_ble_bigdata.c
+    ${AK_DIR}/modules/tuya-ble/src/tuya_ble_prov.c
+    ${AK_DIR}/modules/tuya-ble/src/tuya_ble_trsmitr.c
+
+    # PAL (FreeRTOS+lwIP) and shared common transport / log / RNG
+    ${AK_DIR}/pal/pal_freertos.c
+    ${AK_DIR}/common/tls.c
+    ${AK_DIR}/common/log.c
+    ${AK_DIR}/common/rng.c
+
+    # vendored coreHTTP
+    ${AK_DIR}/third_party/coreHTTP/source/core_http_client.c
+    ${AK_DIR}/third_party/coreHTTP/source/dependency/3rdparty/llhttp/src/api.c
+    ${AK_DIR}/third_party/coreHTTP/source/dependency/3rdparty/llhttp/src/http.c
+    ${AK_DIR}/third_party/coreHTTP/source/dependency/3rdparty/llhttp/src/llhttp.c
+
+    # vendored coreMQTT
+    ${AK_DIR}/third_party/coreMQTT/source/core_mqtt.c
+    ${AK_DIR}/third_party/coreMQTT/source/core_mqtt_serializer.c
+    ${AK_DIR}/third_party/coreMQTT/source/core_mqtt_state.c
+)
+
+idf_component_register(
+    SRCS ${AK_SRCS}
+    INCLUDE_DIRS
+        ${AK_DIR}/modules/biz-client/include
+        ${AK_DIR}/modules/rtc-tcp-client/include
+        ${AK_DIR}/modules/iot-client/include
+        ${AK_DIR}/modules/tuya-ble/include
+        ${AK_DIR}/pal
+        ${AK_DIR}/common
+    PRIV_INCLUDE_DIRS
+        ${AK_DIR}/modules/rtc-tcp-client/src
+        ${AK_DIR}/modules/iot-client/src
+        ${AK_DIR}/third_party/coreHTTP/source/include
+        ${AK_DIR}/third_party/coreHTTP/source/interface
+        ${AK_DIR}/third_party/coreHTTP/source/dependency/3rdparty/llhttp/include
+        ${AK_DIR}/third_party/coreMQTT/source/include
+        ${AK_DIR}/third_party/coreMQTT/source/interface
+        ${AK_DIR}/third_party/cJSON
+    REQUIRES mbedtls json freertos lwip esp_event esp_netif esp_timer esp_wifi
+)
+
+# No MQTT_DO_NOT_USE_CUSTOM_CONFIG: coreMQTT must pick up common/core_mqtt_config.h
+# here too, or a refused CONNECT logs only a bare MQTTServerRefused on exactly the
+# target this diagnostic exists for. ${AK_DIR}/common is already in INCLUDE_DIRS
+# above, so common/log.h (the override pickup + log-ceiling default) resolves with
+# no further wiring; knob defaults resolve the same way from each module's include/
+# dir and ${AK_DIR}/pal listed above.
+#
+# Per-product knob overrides: kit_opts/agentic_kit_config.h next door is
+# picked up by common/log.h's override search via the include path below
+# (PRIVATE is enough: only this component's TUs compile SDK sources, and
+# the app's own TUs are covered by the component's public INCLUDE_DIRS
+# reaching them -- the header is only consumed through common/log.h).
+# It currently holds one override: AGENTIC_KIT_LOG, remapping the SDK's
+# log dispatch into ESP-IDF logging (esp_log.h), macro-to-macro.
+target_include_directories(${COMPONENT_LIB} PRIVATE
+    "${CMAKE_CURRENT_LIST_DIR}/kit_opts"
+)
+
+target_compile_options(${COMPONENT_LIB} PRIVATE
+    -Wno-error=format
+)
