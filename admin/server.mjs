@@ -6,13 +6,15 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createFakeTuyaService } from '../runners/fake-tuya-service.mjs';
 import { FakeTuyaClient } from '../adapters/fake-tuya-client.mjs';
+import { executeWorkflow, validateWorkflow } from '../runners/workflow-engine.mjs';
 const folder=dirname(fileURLToPath(import.meta.url));
 const valid=s=>typeof s==='string' && /^[A-Za-z0-9_-]{1,48}$/.test(s);
 const respond=(res,status,value,type='application/json')=>{res.writeHead(status,{'content-type':type,'cache-control':'no-store','x-content-type-options':'nosniff','content-security-policy':"default-src 'self'; style-src 'self'; script-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none'"});res.end(type==='application/json'?JSON.stringify(value):value)};
 async function load(path){try{return JSON.parse(await readFile(path,'utf8'))}catch(e){if(e.code==='ENOENT')return null;throw e}}
 async function persist(path,value){await mkdir(dirname(path),{recursive:true});const tmp=path+'.'+randomUUID()+'.tmp';const f=await open(tmp,'wx',0o600);try{await f.writeFile(JSON.stringify(value,null,2));await f.sync()}finally{await f.close()}await rename(tmp,path)}
 export async function createAdmin({dataFile=join(process.cwd(),'.local','agentpanel.json')}={}){
- let db=await load(dataFile)??{agents:[],devices:[],runs:[]};const workers=new Map();let saving=Promise.resolve();
+ let db=await load(dataFile)??{agents:[],devices:[],runs:[],workflows:[]};
+ db.workflows??=[];const workers=new Map();let saving=Promise.resolve();
  const save=()=>{saving=saving.then(()=>persist(dataFile,db));return saving};
  async function fake(d){if(workers.has(d.id))return workers.get(d.id);const service=createFakeTuyaService({token:d.token,tenant:d.tenant,device:d.id});await new Promise(resolve=>service.listen(0,'127.0.0.1',resolve));const client=new FakeTuyaClient({baseUrl:`http://127.0.0.1:${service.address().port}`,token:d.token,tenant:d.tenant,device:d.id});workers.set(d.id,{service,client});return workers.get(d.id)}
  const device=d=>({id:d.id,name:d.name,tenant:d.tenant,type:'virtual_lamp',runtime:'EPHEMERAL_FAKE',connected:workers.has(d.id)});
@@ -22,10 +24,11 @@ export async function createAdmin({dataFile=join(process.cwd(),'.local','agentpa
    const u=new URL(req.url,'http://localhost');
    if(req.method==='GET'&&u.pathname==='/')return respond(res,200,await readFile(join(folder,'index.html'),'utf8'),'text/html; charset=utf-8');
    if(req.method==='GET'&&u.pathname==='/admin.js')return respond(res,200,await readFile(join(folder,'admin.js'),'utf8'),'text/javascript; charset=utf-8');
-   if(req.method==='GET'&&u.pathname==='/api/overview')return respond(res,200,{agents:db.agents.map(agent),devices:db.devices.map(device),runs:db.runs,limits:['LOCAL_DEV_ONLY','NO_REAL_AGENTSCOPE','NO_VM_SANDBOX','NO_TUYA_HARDWARE']});
+   if(req.method==='GET'&&u.pathname==='/api/overview')return respond(res,200,{agents:db.agents.map(agent),devices:db.devices.map(device),runs:db.runs,workflows:db.workflows,limits:['LOCAL_DEV_ONLY','NO_REAL_AGENTSCOPE','NO_VM_SANDBOX','NO_TUYA_HARDWARE']});
    if(req.method==='GET'&&u.pathname.startsWith('/api/devices/')&&u.pathname.endsWith('/state')){const id=u.pathname.slice(13,-6),d=db.devices.find(x=>x.id===id);if(!d)return respond(res,404,{error:'NOT_FOUND'});const {client}=await fake(d);return respond(res,200,{deviceId:id,...(await client.get('/v1/state')).body,source:'EPHEMERAL_FAKE'})}
+   if(req.method==='GET' && /^\/api\/workflows\/[a-f0-9-]{36}$/.test(u.pathname)){const w=db.workflows.find(w=>w.id===u.pathname.split('/')[3]);return w?respond(res,200,w):respond(res,404,{error:'NOT_FOUND'})}
    if(req.method!=='POST')return respond(res,404,{error:'NOT_FOUND'});
-   if(!['/api/agents','/api/devices'].includes(u.pathname)&&!/^\/api\/agents\/[a-f0-9-]{36}\/run$/.test(u.pathname))return respond(res,404,{error:'NOT_FOUND'});
+   if(!['/api/agents','/api/devices','/api/workflows'].includes(u.pathname)&&!/^\/api\/workflows\/[a-f0-9-]{36}\/run$/.test(u.pathname)&&!/^\/api\/agents\/[a-f0-9-]{36}\/run$/.test(u.pathname))return respond(res,404,{error:'NOT_FOUND'});
    if(req.headers['content-type']?.split(';')[0]!=='application/json')return respond(res,415,{error:'JSON_REQUIRED'});
    let raw='';for await(const chunk of req){raw+=chunk;if(raw.length>4096)return respond(res,413,{error:'BODY_TOO_LARGE'})}
    let input;try{input=JSON.parse(raw)}catch{return respond(res,400,{error:'INVALID_JSON'})}if(!input||typeof input!=='object'||Array.isArray(input))return respond(res,400,{error:'INVALID_JSON'});
@@ -37,6 +40,28 @@ export async function createAdmin({dataFile=join(process.cwd(),'.local','agentpa
     if(!valid(input.name)||!valid(input.tenant)||!Array.isArray(input.devices)||input.devices.length<1||input.devices.length>8||new Set(input.devices).size!==input.devices.length||Object.keys(input).some(k=>!['name','tenant','devices'].includes(k)))return respond(res,400,{error:'INVALID_AGENT'});
     if(input.devices.some(id=>!db.devices.some(d=>d.id===id&&d.tenant===input.tenant)))return respond(res,403,{error:'CROSS_TENANT_DEVICE'});
     const a={id:randomUUID(),name:input.name,tenant:input.tenant,devices:input.devices};db.agents.push(a);await save();return respond(res,201,agent(a));
+   }
+   if(u.pathname==='/api/workflows'){
+    if(!valid(input.agentId))return respond(res,400,{error:'INVALID_AGENT_ID'});
+    const a=db.agents.find(x=>x.id===input.agentId);
+    if(!a)return respond(res,404,{error:'AGENT_NOT_FOUND'});
+    const def={name:input.name,nodes:input.nodes};
+    if(Object.keys(input).some(k=>!['agentId','name','nodes'].includes(k)))return respond(res,400,{error:'INVALID_WORKFLOW'});
+    const error=validateWorkflow(def,{tenant:a.tenant,authorizedDevices:db.devices.filter(d=>a.devices.includes(d.id))});
+    if(error)return respond(res,error==='DEVICE_NOT_AUTHORIZED'?403:400,{error});
+    const workflow={id:randomUUID(),agentId:a.id,tenant:a.tenant,revision:1,definition:def};
+    db.workflows.push(workflow);await save();return respond(res,201,workflow);
+   }
+   const match=u.pathname.match(/^\/api\/workflows\/([a-f0-9-]{36})\/run$/);
+   if(match){
+    if(Object.keys(input).length!==0)return respond(res,400,{error:'NO_RUN_ARGUMENTS_ALLOWED'});
+    const workflow=db.workflows.find(x=>x.id===match[1]),a=db.agents.find(x=>x.id===workflow?.agentId);
+    if(!workflow||!a)return respond(res,404,{error:'WORKFLOW_NOT_FOUND'});
+    const allowed=db.devices.filter(d=>a.devices.includes(d.id));
+    const result=await executeWorkflow({definition:workflow.definition,tenant:a.tenant,workflowId:workflow.id,authorizedDevices:allowed,
+       acquire:async id=>(await fake(db.devices.find(d=>d.id===id))).client,
+       saveRun:async run=>{const index=db.runs.findIndex(r=>r.id===run.id);const copy=structuredClone(run);if(index<0)db.runs.unshift(copy);else db.runs[index]=copy;db.runs=db.runs.slice(0,250);await save()}});
+    return respond(res,result.status==='DENIED'?403:200,result);
    }
    const id=u.pathname.split('/')[3],a=db.agents.find(x=>x.id===id),d=db.devices.find(x=>x.id===input.deviceId);
    if(!a||!d)return respond(res,404,{error:'NOT_FOUND'});
