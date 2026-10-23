@@ -1,0 +1,124 @@
+{
+  "schema_version": 1,
+  "source": "GitHub repository commit API; 2026-10-23",
+  "strategy": "record-all-fetch-selectively",
+  "upstreams": [
+    {
+      "name": "tuya/TuyaOpen",
+      "url": "https://github.com/tuya/TuyaOpen.git",
+      "commit": "65dc25312ca2c3e25599d90966f3a9c3af87c871",
+      "role": "firmware-root",
+      "install": "baseline-pinned-v1.9.0",
+      "license_repository_metadata": "NOASSERTION",
+      "component_license_audit_required": true
+    },
+    {
+      "name": "tuya/agentic-kit",
+      "url": "https://github.com/tuya/agentic-kit.git",
+      "commit": "4a74455f6ed1c105b654421256d48a6802430b29",
+      "role": "optional-device-ai",
+      "install": "optional",
+      "license_repository_metadata": "Apache-2.0",
+      "component_license_audit_required": true
+    },
+    {
+      "name": "tuya/tuya-mcp-sdk",
+      "url": "https://github.com/tuya/tuya-mcp-sdk.git",
+      "commit": "458446ad17749ccc3acd6bb6da50ed87ada4d287",
+      "role": "optional-cloud-mcp",
+      "install": "optional",
+      "license_repository_metadata": "Apache-2.0",
+      "component_license_audit_required": true
+    },
+    {
+      "name": "tuya/tuya-connector-python",
+      "url": "https://github.com/tuya/tuya-connector-python.git",
+      "commit": "82487205a2c5fb8b33eb2515c7395e8ab8b148e3",
+      "role": "cloud-sdk",
+      "install": "existing-package-dependency",
+      "license_repository_metadata": "MIT",
+      "component_license_audit_required": true
+    },
+    {
+      "name": "tuya/tuya-smart-control-cli",
+      "url": "https://github.com/tuya/tuya-smart-control-cli.git",
+      "commit": "4b54cfb428526df947ca7a4a8f9f493931937aae",
+      "role": "read-only-diagnostics-first",
+      "install": "optional",
+      "license_repository_metadata": "MIT",
+      "component_license_audit_required": true
+    },
+    {
+      "name": "tuya/TuyaOpen-esp32",
+      "url": "https://github.com/tuya/TuyaOpen-esp32.git",
+      "commit": "8cd2a15a90c56ffc263efb04713445fc0d5c615b",
+      "role": "tuyaopen-managed-subdependency",
+      "install": "do-not-clone-separately",
+      "license_repository_metadata": "Apache-2.0",
+      "component_license_audit_required": true
+    },
+    {
+      "name": "tuya/arduino-TuyaOpen",
+      "url": "https://github.com/tuya/arduino-TuyaOpen.git",
+      "commit": "b844b0790862914a80abe5ffca5546468a0d6d73",
+      "role": "alternative-firmware",
+      "install": "do-not-combine",
+      "license_repository_metadata": "LGPL-2.1",
+      "component_license_audit_required": true
+    },
+    {
+      "name": "espressif/esp-idf",
+      "url": "https://github.com/espressif/esp-idf.git",
+      "commit": "383dda6c182e3dabf6355160166fe007df775629",
+      "role": "tuyaopen-toolchain",
+      "install": "use-parent-selected-version",
+      "license_repository_metadata": "Apache-2.0",
+      "component_license_audit_required": true
+    },
+    {
+      "name": "espressif/esp-sr",
+      "url": "https://github.com/espressif/esp-sr.git",
+      "commit": "78a923d29a45e4e1433b909d3da12ab5b0f994fc",
+      "role": "optional-speech",
+      "install": "optional",
+      "license_repository_metadata": "NOASSERTION",
+      "component_license_audit_required": true
+    },
+    {
+      "name": "espressif/esp-brookesia",
+      "url": "https://github.com/espressif/esp-brookesia.git",
+      "commit": "68ac00e7aa9012cd8cbf0cbf6bee155801db0e8c",
+      "role": "optional-display",
+      "install": "optional",
+      "license_repository_metadata": "Apache-2.0",
+      "component_license_audit_required": true
+    },
+    {
+      "name": "espressif/esp-matter",
+      "url": "https://github.com/espressif/esp-matter.git",
+      "commit": "fe08b28b5ace9b0135ac031ef3424fa3a62e8455",
+      "role": "alternative-matter-firmware",
+      "install": "separate-target",
+      "license_repository_metadata": "Apache-2.0",
+      "component_license_audit_required": true
+    },
+    {
+      "name": "espressif/esp-skainet",
+      "url": "https://github.com/espressif/esp-skainet.git",
+      "commit": "97885d425d951b41a50747e2c33743d0e233a3e3",
+      "role": "optional-legacy-speech",
+      "install": "reference-only",
+      "license_repository_metadata": "NOASSERTION",
+      "component_license_audit_required": true
+    },
+    {
+      "name": "espressif/esp-rainmaker",
+      "url": "https://github.com/espressif/esp-rainmaker.git",
+      "commit": "275a61ecad875bfc7741d013f843871b528e48ff",
+      "role": "alternative-cloud",
+      "install": "reference-only",
+      "license_repository_metadata": "Apache-2.0",
+      "component_license_audit_required": true
+    }
+  ]
+}
