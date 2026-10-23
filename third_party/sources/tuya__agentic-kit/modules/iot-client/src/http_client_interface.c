@@ -1,0 +1,394 @@
+#include "http_client_interface.h"
+#include "core_http_client.h"
+#include "transport_interface.h"
+#include "iot_internal.h"
+
+#include <string.h>
+#include <stdio.h>
+
+// Shared TLS transport (mbedTLS lives entirely inside common/tls).
+#include "tls.h"
+
+// Network context structure definition with TLS support
+struct HTTPNetworkContext {
+    void *tcp_handle;
+    bool use_tls;
+    tls_t *tls;
+    const char *host;
+    uint16_t port;
+    uint32_t timeout_ms;
+    const pal_t *pal;
+};
+
+// Transport interface send function (supports both TCP and TLS)
+static int32_t transport_send(NetworkContext_t *pNetworkContext,
+                              const void *pBuffer,
+                              size_t bytesToSend) {
+    if (!pNetworkContext) {
+        return OPRT_COMMUNICATION_ERROR;
+    }
+
+    struct HTTPNetworkContext *ctx = (struct HTTPNetworkContext *)pNetworkContext;
+
+    if (ctx->use_tls) {
+        int r = tls_write(ctx->tls, (const uint8_t *)pBuffer,
+                          bytesToSend, 30000 /* 30s */);
+        if (r != TLS_OK) {
+            IOT_LOGE("TLS write error");
+            return OPRT_COMMUNICATION_ERROR;
+        }
+        return (int32_t)bytesToSend;
+    } else {
+        if (!ctx->tcp_handle) {
+            IOT_LOGE("TCP send: connection handle is NULL");
+            return OPRT_COMMUNICATION_ERROR;
+        }
+        int bytes_sent = ctx->pal->tcp_send(ctx->tcp_handle,
+                                            (const uint8_t *)pBuffer, bytesToSend,
+                                            ctx->timeout_ms);
+        if (bytes_sent == PAL_ERR_AGAIN) {
+            return 0;
+        }
+        if (bytes_sent < 0) {
+            IOT_LOGE("TCP send error");
+            return OPRT_COMMUNICATION_ERROR;
+        }
+        return (int32_t)bytes_sent;
+    }
+}
+
+// Transport interface receive function (supports both TCP and TLS)
+static int32_t transport_recv(NetworkContext_t *pNetworkContext,
+                              void *pBuffer,
+                              size_t bytesToRecv) {
+    if (!pNetworkContext) {
+        return OPRT_COMMUNICATION_ERROR;
+    }
+
+    struct HTTPNetworkContext *ctx = (struct HTTPNetworkContext *)pNetworkContext;
+
+    if (ctx->use_tls) {
+        int n = tls_read(ctx->tls, (uint8_t *)pBuffer, bytesToRecv, ctx->timeout_ms);
+        if (n == TLS_ERR_AGAIN) {
+            return 0;   // no data within timeout: coreHTTP polls again
+        }
+        if (n <= 0) {
+            // n<0: TLS error. n==0: graceful peer close_notify — tls_read maps
+            // no-data to TLS_ERR_AGAIN, so 0 here always means the peer closed
+            // (e.g. server closing the connection mid-response). Surface it as an
+            // error so the receive loop fails fast instead of spinning to timeout.
+            IOT_LOGE("TLS read error/closed (n=%d)", n);
+            return OPRT_COMMUNICATION_ERROR;
+        }
+        return n;   // >0 bytes
+    } else {
+        if (!ctx->tcp_handle) {
+            IOT_LOGE("TCP recv: connection handle is NULL");
+            return OPRT_COMMUNICATION_ERROR;
+        }
+        int bytes_received = ctx->pal->tcp_recv(ctx->tcp_handle,
+                                                (uint8_t *)pBuffer, bytesToRecv,
+                                                ctx->timeout_ms);
+        if (bytes_received == PAL_ERR_AGAIN) {
+            return 0;
+        }
+        if (bytes_received < 0) {
+            IOT_LOGE("TCP recv error");
+            return OPRT_COMMUNICATION_ERROR;
+        }
+        return (int32_t)bytes_received;
+    }
+}
+
+// Establish TCP connection
+static void *connect_tcp(const pal_t *pal, const char *host, uint16_t port, uint32_t timeout_ms) {
+    void *handle = pal->tcp_connect(host, port, timeout_ms);
+    if (!handle) {
+        IOT_LOGE("Failed to connect to %s:%d", host, port);
+        return NULL;
+    }
+    IOT_LOGD("TCP connection established to %s:%d", host, port);
+    return handle;
+}
+
+static int connect_tls(struct HTTPNetworkContext *ctx, const char *host, uint16_t port,
+                       const char *cacert, tls_cert_bundle_attach_fn cert_bundle_attach) {
+    bool has_cacert = (cacert && cacert[0] != '\0');
+    if (!has_cacert && !cert_bundle_attach) {
+        IOT_LOGW("No CA certificate provided - server verification disabled");
+    }
+
+    tls_config_t cfg = {
+        .host         = host,
+        .port         = port,
+        .sni          = host,
+        .cacert       = has_cacert ? cacert : NULL,
+        .cert_bundle_attach = cert_bundle_attach,
+        .verify       = TLS_VERIFY_NONE,   // no CA -> no verification (legacy behaviour)
+        .force_tls12  = true,
+        .ciphersuites = tls_ciphersuites_tuya_default(),
+        .connect_timeout_ms = ctx->timeout_ms,
+        .pal          = ctx->pal,
+    };
+
+    ctx->tls = tls_connect(&cfg);
+    if (!ctx->tls) {
+        IOT_LOGE("Failed to establish TLS connection to %s:%d", host, port);
+        return OPRT_TLS_HANDSHAKE_FAILED;
+    }
+    ctx->use_tls = true;
+    IOT_LOGD("TLS connection established to %s:%d", host, port);
+    return OPRT_OK;
+}
+
+// Close connection
+static void disconnect(struct HTTPNetworkContext *ctx) {
+    if (!ctx) {
+        return;
+    }
+
+    if (ctx->use_tls) {
+        if (ctx->tls) {
+            tls_close(ctx->tls);   // sends close_notify, closes the socket, frees state
+            ctx->tls = NULL;
+        }
+        ctx->use_tls = false;
+    } else {
+        if (ctx->tcp_handle) {
+            ctx->pal->tcp_close(ctx->tcp_handle);
+            ctx->tcp_handle = NULL;
+        }
+    }
+}
+
+http_client_status_t http_client_request(const http_client_request_t *request,
+                                        http_client_response_t *response)
+{
+    if (!request || !response) {
+        return HTTP_CLIENT_INVALID_PARAM;
+    }
+
+    if (!request->host || !request->method || !request->path) {
+        return HTTP_CLIENT_INVALID_PARAM;
+    }
+
+    // Initialize response
+    memset(response, 0, sizeof(http_client_response_t));
+
+    const pal_t *pal = request->pal;
+
+    // Determine if TLS should be used
+    bool use_tls = (request->port == 443) ||
+                   (request->cacert != NULL && request->cacert[0] != '\0') ||
+                   (request->cert_bundle_attach != NULL);
+    if (request->port == 80) {
+        use_tls = false;
+    }
+
+    // Network context lives on the stack (call-local, never returned).
+    struct HTTPNetworkContext network_ctx_buf;
+    struct HTTPNetworkContext *network_ctx = &network_ctx_buf;
+
+    network_ctx->tcp_handle = NULL;
+    network_ctx->use_tls = false;
+    network_ctx->tls = NULL;
+    network_ctx->host = request->host;
+    network_ctx->port = request->port;
+    network_ctx->pal = pal;
+    network_ctx->timeout_ms = request->timeout_ms > 0 ? request->timeout_ms : IOT_HTTP_TIMEOUT_MS_DEFAULT;
+
+    // Connect to server
+    int connect_ret = OPRT_COMMUNICATION_ERROR;
+    if (use_tls) {
+        connect_ret = connect_tls(network_ctx, request->host, request->port,
+                                  request->cacert, request->cert_bundle_attach);
+    } else {
+        network_ctx->tcp_handle = connect_tcp(network_ctx->pal, request->host, request->port,
+                                              network_ctx->timeout_ms);
+        connect_ret = network_ctx->tcp_handle ? 0 : OPRT_COMMUNICATION_ERROR;
+    }
+
+    if (connect_ret != 0) {
+        IOT_LOGE("Failed to connect to %s:%d", request->host, request->port);
+        return (connect_ret == OPRT_TLS_HANDSHAKE_FAILED) ? HTTP_CLIENT_TLS_ERROR : HTTP_CLIENT_ERROR;
+    }
+
+    // Setup transport interface
+    TransportInterface_t transport = {
+        .recv = transport_recv,
+        .send = transport_send,
+        .writev = NULL,
+        .pNetworkContext = (NetworkContext_t *)network_ctx
+    };
+
+    // One block holds both the request-header and response buffers (both alive
+    // through HTTPClient_Send) -- one allocation instead of two.
+    /* Sizes are overridable at build time (-D or your own agentic_kit_config.h
+     * on the include path; defaults and rationale in
+     * include/iot_client_config_defaults.h) because the right size is a property of
+     * the PRODUCT, not of the SDK: an ATOP activation response carries the
+     * device's DP schema, so a product with a moderately large schema
+     * overflows any fixed default. Observed on a Tuya alarm-clock product:
+     * contentLength 6558 with a 4096 buffer -> HTTPInsufficientMemory, even
+     * though the server had returned 200 and the activation had SUCCEEDED on
+     * its side. The buffer is taken from the PAL allocator, so raising it
+     * lands in PSRAM on targets that route large allocations there. */
+    uint8_t *http_buf = (uint8_t *)pal->malloc(AGENTIC_KIT_REQUEST_HEADER_BUFFER_SIZE + AGENTIC_KIT_RESPONSE_BUFFER_SIZE);
+    if (!http_buf) {
+        IOT_LOGE("Failed to allocate HTTP buffers");
+        disconnect(network_ctx);
+        return HTTP_CLIENT_ERROR;
+    }
+    uint8_t *request_header_buffer = http_buf;
+    uint8_t *response_buffer       = http_buf + AGENTIC_KIT_REQUEST_HEADER_BUFFER_SIZE;
+    HTTPRequestHeaders_t request_headers = {
+        .pBuffer = request_header_buffer,
+        .bufferLen = AGENTIC_KIT_REQUEST_HEADER_BUFFER_SIZE,
+        .headersLen = 0
+    };
+
+    // Prepare request info
+    HTTPRequestInfo_t request_info = {
+        .pMethod = request->method,
+        .methodLen = strlen(request->method),
+        .pPath = request->path,
+        .pathLen = strlen(request->path),
+        .pHost = request->host,
+        .hostLen = strlen(request->host),
+        .reqFlags = 0
+    };
+
+    // Initialize request headers
+    HTTPStatus_t http_status = HTTPClient_InitializeRequestHeaders(&request_headers, &request_info);
+    if (http_status != HTTPSuccess) {
+        IOT_LOGE("Failed to initialize request headers: %d", http_status);
+        pal->free(http_buf);
+        disconnect(network_ctx);
+        return HTTP_CLIENT_ERROR;
+    }
+
+    // Add custom headers
+    for (uint8_t i = 0; i < request->headers_count; i++) {
+        http_status = HTTPClient_AddHeader(&request_headers,
+                                          request->headers[i].key,
+                                          strlen(request->headers[i].key),
+                                          request->headers[i].value,
+                                          strlen(request->headers[i].value));
+        if (http_status != HTTPSuccess) {
+            IOT_LOGE("Failed to add header %s: %d", request->headers[i].key, http_status);
+            pal->free(http_buf);
+            disconnect(network_ctx);
+            return HTTP_CLIENT_ERROR;
+        }
+    }
+
+    HTTPResponse_t http_response = {
+        .pBuffer = response_buffer,
+        .bufferLen = AGENTIC_KIT_RESPONSE_BUFFER_SIZE,
+        .pHeaderParsingCallback = NULL,
+        .getTime = NULL,
+        .pHeaders = NULL,
+        .headersLen = 0,
+        .pBody = NULL,
+        .bodyLen = 0,
+        .statusCode = 0,
+        .contentLength = 0,
+        .headerCount = 0,
+        .areHeadersComplete = 0,
+        .respOptionFlags = 0,
+        .respFlags = 0
+    };
+
+    // Send HTTP request
+    http_status = HTTPClient_Send(&transport,
+                                  &request_headers,
+                                  request->body,
+                                  request->body_length,
+                                  &http_response,
+                                  0);  // No special flags
+
+    // Free request header buffer after HTTPClient_Send (no longer needed)
+
+    http_client_status_t ret_status = HTTP_CLIENT_SUCCESS;
+
+    if (http_status == HTTPSuccess) {
+        // Extract status code
+        response->status_code = http_response.statusCode;
+
+        // Copy response body BEFORE freeing response_buffer
+        // http_response.pBody may point into response_buffer
+        // Allocate +1 byte for null terminator (body is often used as string)
+        if (http_response.bodyLen > 0 && http_response.pBody) {
+            response->body = (uint8_t *)pal->malloc(http_response.bodyLen + 1);
+            if (response->body) {
+                memcpy(response->body, http_response.pBody, http_response.bodyLen);
+                response->body[http_response.bodyLen] = '\0';
+                response->body_length = http_response.bodyLen;
+            } else {
+                IOT_LOGE("Failed to allocate response body buffer");
+                ret_status = HTTP_CLIENT_ERROR;
+                response->internal = NULL;
+                pal->free(http_buf);
+                disconnect(network_ctx);
+                return ret_status;
+            }
+        }
+
+        response->internal = NULL;
+
+        IOT_LOGD("HTTP request successful: status=%d, body_len=%d",
+                 response->status_code, (int)response->body_length);
+    } else {
+        /* Name the actual cause. HTTPInsufficientMemory used to surface to the
+         * caller as a generic "Communication error", which sends people hunting
+         * the network for what is really a too-small buffer — and the request
+         * may well have SUCCEEDED on the server (HTTP 200) before we ran out of
+         * room to read the reply. */
+        if (http_status == HTTPInsufficientMemory) {
+            IOT_LOGE("HTTP response does not fit: need %u B body + %u B headers, "
+                      "buffer is %d B (server said %u). Rebuild with a larger "
+                      "-DAGENTIC_KIT_RESPONSE_BUFFER_SIZE.",
+                      (unsigned)http_response.contentLength,
+                      (unsigned)http_response.headersLen,
+                      AGENTIC_KIT_RESPONSE_BUFFER_SIZE,
+                      (unsigned)http_response.statusCode);
+        } else {
+            IOT_LOGE("HTTP request failed: %d", http_status);
+        }
+
+        // Map coreHTTP status to our status
+        switch (http_status) {
+            case HTTPNetworkError:
+                ret_status = HTTP_CLIENT_ERROR;
+                break;
+            case HTTPInvalidParameter:
+                ret_status = HTTP_CLIENT_INVALID_PARAM;
+                break;
+            case HTTPInsufficientMemory:
+                ret_status = HTTP_CLIENT_ERROR;
+                break;
+            default:
+                ret_status = HTTP_CLIENT_ERROR;
+                break;
+        }
+
+    }
+    pal->free(http_buf);
+    disconnect(network_ctx);
+    return ret_status;
+}
+
+void http_client_free(const pal_t *pal, http_client_response_t *response)
+{
+    if (!response) {
+        return;
+    }
+
+    if (response->body) {
+        pal->free(response->body);
+        response->body = NULL;
+    }
+
+    response->body_length = 0;
+    response->status_code = 0;
+}
