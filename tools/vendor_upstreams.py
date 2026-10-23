@@ -16,7 +16,7 @@ import sys
 ROOT = Path(__file__).resolve().parents[1]
 CATALOG = ROOT / "upstreams" / "sources.lock.json"
 DEST = ROOT / "third_party" / "sources"
-REJECT = {".git", ".venv", "node_modules", "build", "dist", "__pycache__", ".deps"}
+REJECT = {".git", ".venv", "node_modules", "__pycache__", ".deps"}
 MAX_SINGLE_BYTES = 95 * 1024 * 1024
 
 def git(*args, cwd=ROOT):

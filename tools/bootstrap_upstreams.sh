@@ -4,10 +4,11 @@ cd "$(dirname "$0")/.."
 python3 - "$@" <<'PY'
 import json, pathlib, subprocess, sys
 manifest=json.loads(pathlib.Path("upstreams/sources.lock.json").read_text())
-modes={"core":{"tuya/TuyaOpen"},"cloud":{"tuya/tuya-connector-python","tuya/tuya-smart-control-cli","tuya/tuya-mcp-sdk"},"ai":{"tuya/agentic-kit","espressif/esp-sr"},"display":{"espressif/esp-brookesia"},"matter":{"espressif/esp-matter"},"all":set()}
+modes={"core":{"tuya/TuyaOpen"},"cloud":{"tuya/tuya-connector-python","tuya/tuya-smart-control-cli","tuya/tuya-mcp-sdk"},"ai":{"tuya/agentic-kit","espressif/esp-sr"},"display":{"espressif/esp-brookesia"},"matter":{"espressif/esp-matter"},"all":set(),"full":set()}
 modes["all"]={x["name"] for x in manifest["upstreams"] if x["install"] in ("optional","existing-package-dependency")}|modes["core"]
+modes["full"]={x["name"] for x in manifest["upstreams"]}
 if len(sys.argv)!=2 or sys.argv[1] not in modes:
-    sys.exit("usage: bash tools/bootstrap_upstreams.sh core|cloud|ai|display|matter|all")
+    sys.exit("usage: bash tools/bootstrap_upstreams.sh core|cloud|ai|display|matter|all|full")
 selected=modes[sys.argv[1]]
 root=pathlib.Path(".deps/upstream")
 root.mkdir(parents=True,exist_ok=True)
