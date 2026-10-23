@@ -1,0 +1,218 @@
+/**
+ * @file ota_demo.c
+ * @brief POSIX OTA demo using the agentic-kit iot_ota API.
+ *
+ * Demonstrates the cloud side of a firmware OTA upgrade:
+ *   1. Initialize iot_client with activated device credentials.
+ *   2. Report the current firmware version via iot_ota_report_version().
+ *   3. Check the cloud for a firmware upgrade via iot_ota_check_upgrade().
+ *   4. If an upgrade is available, report UPGRADING status.
+ *   5. If --download is given, fetch the firmware image to a local file
+ *      (simulating what a real device would write to flash).
+ *   6. Report SUCCESS (or FAILURE).
+ *
+ * On a real embedded target (see examples/esp-idf/ota-demo), steps 5-6 use
+ * the platform's OTA APIs (e.g. esp_ota_write) instead of fwrite.
+ */
+
+#include "ota_demo.h"
+
+#include "iot_client.h"
+#include "iot_ota.h"
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <signal.h>
+#include <unistd.h>
+#include <sys/stat.h>
+
+#include <sys/wait.h>
+
+#define TAG "ota_demo"
+
+/* ----------------------------------------------------------------------- */
+/* Firmware download (simulated — writes to a local file)                  */
+/* ----------------------------------------------------------------------- */
+
+int ota_demo_verify_firmware(iot_client_t *client, const char *path,
+                             const iot_ota_upgrade_info_t *info)
+{
+    iot_ota_verify_ctx_t *ctx = NULL;
+    int rc = iot_ota_verify_init(client, info, &ctx);
+    if (rc == OPRT_NOT_SUPPORTED) {
+        printf("[%s] cloud provided no md5/hmac — skipping digest check\n", TAG);
+        return 0;
+    }
+    if (rc != OPRT_OK) {
+        fprintf(stderr, "[%s] iot_ota_verify_init failed: %d\n", TAG, rc);
+        return -1;
+    }
+
+    FILE *f = fopen(path, "rb");
+    if (!f) {
+        fprintf(stderr, "[%s] cannot open %s for verification\n", TAG, path);
+        iot_ota_verify_abort(ctx);
+        return -1;
+    }
+
+    uint8_t buf[4096];
+    size_t n;
+    while ((n = fread(buf, 1, sizeof(buf), f)) > 0) {
+        if (iot_ota_verify_update(ctx, buf, n) != OPRT_OK) {
+            fprintf(stderr, "[%s] digest update failed\n", TAG);
+            fclose(f);
+            iot_ota_verify_abort(ctx);
+            return -1;
+        }
+    }
+    /* fread() returns 0 for both EOF and I/O error; without this the digest
+     * would be computed over a truncated prefix and reported as a mismatch. */
+    if (ferror(f)) {
+        fprintf(stderr, "[%s] read error on %s\n", TAG, path);
+        fclose(f);
+        iot_ota_verify_abort(ctx);
+        return -1;
+    }
+    fclose(f);
+
+    rc = iot_ota_verify_finish(ctx);
+    if (rc == OPRT_OK) {
+        printf("[%s] firmware digest verified\n", TAG);
+        return 0;
+    }
+    fprintf(stderr, "[%s] firmware digest mismatch (rc=%d)\n", TAG, rc);
+    return -1;
+}
+
+int ota_demo_download_firmware(const char *url, const char *out_path,
+                               long expected_size)
+{
+    printf("[%s] downloading %s -> %s\n", TAG, url, out_path);
+
+    /* Use curl(1) for simplicity in this POSIX demo. A real device uses its
+     * platform HTTP client and flash-write API. */
+    char cmd[2048];
+    int sn = snprintf(cmd, sizeof(cmd), "curl -sSL --fail -o '%s' '%s'",
+                      out_path, url);
+    if (sn < 0 || (size_t)sn >= sizeof(cmd)) {
+        fprintf(stderr, "[%s] firmware URL is too long for the demo buffer\n", TAG);
+        return -1;
+    }
+
+    int rc = system(cmd);
+    if (rc != 0) {
+        fprintf(stderr, "[%s] curl failed (rc=%d)\n", TAG, rc);
+        return -1;
+    }
+
+    struct stat st;
+    if (stat(out_path, &st) != 0) {
+        fprintf(stderr, "[%s] cannot stat %s\n", TAG, out_path);
+        return -1;
+    }
+
+    printf("[%s] downloaded %lld bytes\n", TAG, (long long)st.st_size);
+    if (expected_size > 0 && (long)st.st_size != expected_size) {
+        fprintf(stderr, "[%s] size mismatch: got %lld, expected %ld\n",
+                TAG, (long long)st.st_size, expected_size);
+        return -1;
+    }
+
+    printf("[%s] firmware image saved to %s\n", TAG, out_path);
+    printf("[%s] (on a real device, this would be written to OTA flash)\n", TAG);
+    return 0;
+}
+
+/* ----------------------------------------------------------------------- */
+/* Demo entry point                                                        */
+/* ----------------------------------------------------------------------- */
+
+int demo_ota_run(const char *devid, const char *secret_key, const char *local_key,
+                 const char *sw_ver, int auto_download)
+{
+    if (iot_init_default() != OPRT_OK) {
+        fprintf(stderr, "[%s] iot_init_default failed\n", TAG);
+        return -1;
+    }
+    /* Log volume is decided at compile time now; build with
+     * -DAGENTIC_KIT_LOG_LEVEL=3 to restore the info-only volume. */
+
+    /* 1. Initialize iot_client */
+    iot_client_config_t cfg = {
+        .region            = AY,
+        .env               = PROD,
+        .mqtt_disable_tls  = false,
+        .mqtt_disable_auto_connect = true,
+        .sw_ver            = sw_ver,
+    };
+    strncpy(cfg.devid,      devid,      sizeof(cfg.devid) - 1);
+    strncpy(cfg.secret_key, secret_key, sizeof(cfg.secret_key) - 1);
+    strncpy(cfg.local_key,  local_key,  sizeof(cfg.local_key) - 1);
+
+    iot_client_t *client = iot_client_init(&cfg);
+    if (!client) {
+        fprintf(stderr, "[%s] iot_client_init failed\n", TAG);
+        return -1;
+    }
+    printf("[%s] client initialized (devid=%s, sw_ver=%s)\n", TAG, client->devid, sw_ver);
+
+    /* 2. Check for firmware upgrade */
+    printf("[%s] checking cloud for firmware upgrade...\n", TAG);
+    iot_ota_upgrade_info_t info = {0};
+    int rc = iot_ota_check_upgrade(client, 0, &info);
+    if (rc != OPRT_OK) {
+        fprintf(stderr, "[%s] iot_ota_check_upgrade failed: %d\n", TAG, rc);
+        iot_ota_upgrade_info_free(client, &info);
+        iot_client_deinit(client);
+        return -1;
+    }
+
+    if (!info.has_upgrade) {
+        printf("[%s] no firmware upgrade available\n", TAG);
+        iot_ota_upgrade_info_free(client, &info);
+        iot_client_deinit(client);
+        return 0;
+    }
+
+    /* 3. Print upgrade info */
+    printf("[%s] ===== firmware upgrade available =====\n", TAG);
+    printf("[%s]   version : %s\n", TAG, info.version ? info.version : "?");
+    printf("[%s]   url     : %s\n", TAG, info.url);
+    printf("[%s]   size    : %ld bytes\n", TAG, info.file_size);
+    printf("[%s]   channel : %d\n", TAG, info.channel);
+    printf("[%s]   md5     : %s\n", TAG, info.md5 ? info.md5 : "(none)");
+    printf("[%s]   hmac    : %s\n", TAG, info.hmac ? info.hmac : "(none)");
+
+    /* 4. Optionally download the firmware image */
+    int result = 0;
+    if (auto_download && info.url) {
+        /* Report UPGRADING status before downloading */
+        printf("[%s] reporting UPGRADING status...\n", TAG);
+        rc = iot_ota_report_status(client, info.channel, OTA_STATUS_UPGRADING);
+        if (rc != OPRT_OK) {
+            fprintf(stderr, "[%s] failed to report UPGRADING: %d\n", TAG, rc);
+        }
+
+        char out_path[256];
+        snprintf(out_path, sizeof(out_path), "firmware_%s.bin",
+                 info.version ? info.version : "unknown");
+
+        if (ota_demo_download_firmware(info.url, out_path, info.file_size) != 0 ||
+            ota_demo_verify_firmware(client, out_path, &info) != 0) {
+            fprintf(stderr, "[%s] firmware download/verify failed\n", TAG);
+            printf("[%s] reporting FAILURE status...\n", TAG);
+            iot_ota_report_status(client, info.channel, OTA_STATUS_ERROR);
+            result = -1;
+        } else {
+            printf("[%s] reporting SUCCESS status...\n", TAG);
+            iot_ota_report_status(client, info.channel, OTA_STATUS_COMPLETE);
+        }
+    } else {
+        printf("[%s] (use --download to fetch the image)\n", TAG);
+    }
+
+    iot_ota_upgrade_info_free(client, &info);
+    iot_client_deinit(client);
+    return result;
+}

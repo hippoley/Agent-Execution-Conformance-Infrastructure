@@ -1,0 +1,208 @@
+/**
+ * @file activate_demo.c
+ * @brief API-based activation demo: token is obtained externally via Tuya
+ *        OpenAPI and passed directly to the device.
+ *
+ * Flow:
+ *  1. Receive the pairing token from the caller (originally from OpenAPI).
+ *  2. iot_client_init_on_boarding_with_token() -- activate device with token.
+ *  3. iot_client_get_session_token() -- verify cloud connectivity.
+ *  4. With --release: query binding status, call
+ *     iot_client_reset(IOT_RESET_UNBIND_ONLY), then query binding status again.
+ *     The reset hands the binding back and keeps the cloud-side data.
+ *
+ * Step 4 is the other end of step 2. Activation and release are one lifecycle,
+ * so they live in one demo: a device that binds itself must be able to unbind
+ * itself, and the two calls have mirrored ownership -- activation returns a
+ * client, a successful reset destroys it.
+ *
+ * This is the *device-initiated* direction. The cloud-initiated one (a user
+ * removing the device from the app, which arrives as a protocol-11 push) is a
+ * different mechanism with a different callback; see pair/unbind-demo.
+ */
+
+#include "activate_demo.h"
+#include "iot_client.h"
+#include "iot_dp.h"
+
+#include <stdio.h>
+#include <string.h>
+
+#define TAG "api_activate"
+
+/* Cloud set one or more DPs on this device. */
+static void demo_dp_callback(uint8_t dp_id, const iot_dp_value_t *value, void *user_data)
+{
+    (void)user_data;
+    printf("[%s] DP downlink: id=%u type=%d\n", TAG, dp_id, value->type);
+    /* React to the new value here (drive hardware, update UI, ...). */
+}
+
+/* DP state changed — persist the snapshot. The SDK does NOT write storage; the
+ * application owns that. Each callback carries the full state, so dropping
+ * intermediate snapshots (debounce) is safe. */
+static void demo_dp_save_callback(const char *dp_state_json, void *user_data)
+{
+    (void)user_data;
+    printf("[%s] persist DP state: %s\n", TAG, dp_state_json);
+    /* e.g. write dp_state_json to a file / flash / NVS keyed by devid. */
+}
+
+static void print_binding_status(const iot_binding_status_request_t *request, const char *stage)
+{
+    iot_binding_status_t status;
+    int rc = iot_get_binding_status(request, &status);
+    if (rc != OPRT_OK) {
+        printf("[%s] %s: binding status query failed (rc=%d)\n", TAG, stage, rc);
+        return;
+    }
+
+    const char *name;
+    switch (status) {
+    case IOT_BINDING_STATUS_BOUND:
+        name = "enable (bound)";
+        break;
+    case IOT_BINDING_STATUS_UNBOUND:
+        name = "reset (unbound)";
+        break;
+    case IOT_BINDING_STATUS_FACTORY_RESET:
+        name = "reset_factory (factory reset requested)";
+        break;
+    default:
+        name = "unknown";
+        break;
+    }
+    printf("[%s] %s: binding status=%s (rc=%d)\n", TAG, stage, name, rc);
+}
+
+int demo_activate_run(const char *token,
+                      const char *uuid, const char *authkey,
+                      const char *product_key, const char *firmware_key,
+                      bool release)
+{
+    if (iot_init_default() != OPRT_OK) {
+        fprintf(stderr, "[%s] iot_init_default failed\n", TAG);
+        return -1;
+    }
+    /* Full SDK debug output used to need log_set_level(LOG_DEBUG) here;
+     * the default compile-time ceiling (4) now emits it unconditionally. */
+
+    iot_on_boarding_config_t cfg = {
+        .timeout_ms       = 10000,
+        .env              = PROD,
+        .mqtt_disable_tls = false,
+    };
+    strncpy(cfg.uuid,         uuid,         sizeof(cfg.uuid) - 1);
+    strncpy(cfg.authkey,      authkey,      sizeof(cfg.authkey) - 1);
+    strncpy(cfg.product_key,  product_key,  sizeof(cfg.product_key) - 1);
+    if (firmware_key && firmware_key[0])
+        strncpy(cfg.firmware_key, firmware_key, sizeof(cfg.firmware_key) - 1);
+
+    printf("[%s] Activating with token: %s\n", TAG, token);
+    iot_client_t *client = iot_client_init_on_boarding_with_token(&cfg, token);
+    if (!client) {
+        fprintf(stderr, "[%s] iot_client_init_on_boarding_with_token failed\n", TAG);
+        return -1;
+    }
+
+    printf("[%s] Activation successful!\n", TAG);
+    printf("[%s] devid      : %s\n", TAG, client->devid);
+    printf("[%s] secret_key : %s\n", TAG, client->secret_key);
+    printf("[%s] local_key  : %s\n", TAG, client->local_key);
+
+    char session_token[2048] = {0};
+    int ret = iot_client_get_session_token(client, NULL, session_token, sizeof(session_token));
+    if (ret != OPRT_OK || session_token[0] == '\0') {
+        fprintf(stderr, "[%s] iot_client_get_session_token failed: %d\n", TAG, ret);
+        iot_client_deinit(client);
+        return -1;
+    }
+    printf("[%s] Session token acquired (len=%zu)\n", TAG, strlen(session_token));
+
+    /* ---- Minimal DP layer usage ----
+     * The DP registry was built from the activation schema automatically.
+     * Persist client->schema_id / client->schema (and the dp_state snapshots
+     * below) so a later boot can restore via iot_client_config_t. */
+    printf("[%s] schema_id  : %s\n", TAG, client->schema_id);
+    iot_dp_set_callback(client, demo_dp_callback, NULL);
+    iot_dp_set_save_callback(client, demo_dp_save_callback, NULL);
+
+    /* Update a couple of DPs locally, then batch-report the dirty ones. Adjust
+     * the ids/types to match your product schema. */
+    iot_dp_value_t on = { .type = IOT_DP_TYPE_BOOL, .value.boolean = true };
+    if (iot_dp_set(client, 1, &on) == OPRT_OK) {
+        iot_dp_report_all_dirty(client);
+    }
+
+    /* Pull the current state on demand (alternative to the save callback). */
+    char *dp_state = NULL;
+    if (iot_dp_dump_json(client, &dp_state) == OPRT_OK && dp_state) {
+        printf("[%s] DP state snapshot: %s\n", TAG, dp_state);
+        client->pal->free(dp_state);
+    }
+
+    /* Receive downlinks: call iot_client_process(client, timeout) in your loop. */
+
+    /* ---- Release: the counterpart of the activation above ----
+     * Note the asymmetry in ownership. Activation handed us a client; a
+     * successful reset takes it away again -- no deinit here, and the pointer
+     * must not be touched afterwards. On failure the client survives, which is
+     * why the error path below can still tear it down normally.
+     *
+     * Save the device credentials for the final status query, which needs no
+     * client instance. Reset and the status queries travel over ATOP HTTPS. */
+    if (release) {
+        char query_devid[sizeof(client->devid)];
+        char query_secret_key[sizeof(client->secret_key)];
+        memcpy(query_devid, client->devid, sizeof(query_devid));
+        memcpy(query_secret_key, client->secret_key, sizeof(query_secret_key));
+        iot_binding_status_request_t query_request = {
+            .devid = query_devid,
+            .secret_key = query_secret_key,
+            .region = client->region,
+            .env = client->env,
+            .cacert = client->cacert,
+            .cert_bundle_attach = client->cert_bundle_attach,
+        };
+        print_binding_status(&query_request, "before unbind");
+
+        char error_code[64] = {0};
+        printf("[%s] releasing the binding (device-initiated reset)...\n", TAG);
+        /* IOT_RESET_UNBIND_ONLY, not IOT_RESET_FACTORY: this demo gives the
+         * binding back and leaves the device's cloud-side data alone, so it can
+         * be run repeatedly. A real decommission -- device discarded or handed
+         * to a new owner -- passes IOT_RESET_FACTORY instead, which also
+         * discards that data and cannot be undone. */
+        int rc = iot_client_reset(client, IOT_RESET_UNBIND_ONLY,
+                                  error_code, sizeof(error_code));
+        if (rc == OPRT_OK) {
+            client = NULL;
+        }
+        print_binding_status(&query_request, rc == OPRT_OK ? "after unbind" : "after unbind attempt");
+        if (rc == OPRT_OK) {
+            /* `client` is gone from here on. A real device would now wipe the
+             * credentials and schema it persisted and re-enter pairing. This
+             * demo writes no persisted state. */
+            printf("[%s] cloud accepted the reset — client destroyed\n", TAG);
+            printf("[%s] activation and release both done; device is unbound\n", TAG);
+            return 0;
+        }
+
+        /* The return code says the cloud refused, not why. Which way to go is
+         * in the errorCode: a terminal one means the binding is already gone,
+         * so retrying never succeeds. */
+        fprintf(stderr, "[%s] reset refused: %d (errorCode=%s)\n",
+                TAG, rc, error_code[0] ? error_code : "(none)");
+        if (strcmp(error_code, "GATEWAY_NOT_EXISTS") == 0) {
+            fprintf(stderr, "[%s] the cloud has no such device — wipe credentials "
+                            "and re-pair; retrying will not help\n", TAG);
+        } else {
+            fprintf(stderr, "[%s] client still usable — retry, or exit\n", TAG);
+        }
+        iot_client_deinit(client);
+        return -1;
+    }
+
+    iot_client_deinit(client);
+    return 0;
+}
