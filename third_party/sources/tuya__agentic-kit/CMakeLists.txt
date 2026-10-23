@@ -1,0 +1,588 @@
+cmake_minimum_required(VERSION 3.20)
+
+set(CMAKE_POLICY_VERSION_MINIMUM 3.5)
+
+project(agentic_kit C)
+
+set(CMAKE_C_STANDARD 99)
+set(CMAKE_C_STANDARD_REQUIRED ON)
+set(CMAKE_C_EXTENSIONS ON)
+
+option(AGENTIC_KIT_BUILD_TESTS "Build tests" ON)
+option(AGENTIC_KIT_BUILD_EXAMPLES "Build posix examples" OFF)
+
+include(CTest)
+include(GNUInstallDirs)
+
+find_package(Threads REQUIRED)
+find_package(Python3 COMPONENTS Interpreter REQUIRED)
+
+set(AGENTIC_KIT_ENABLE_PROJECT_TESTS ${AGENTIC_KIT_BUILD_TESTS})
+set(BUILD_TESTING OFF CACHE BOOL "Disable third-party tests" FORCE)
+# include(CTest) only calls enable_testing() while BUILD_TESTING is ON, and the cache
+# is forced OFF above — so re-configures would silently stop regenerating the ctest
+# list. Enable it explicitly for our own tests.
+if(AGENTIC_KIT_BUILD_TESTS)
+    enable_testing()
+endif()
+set(ENABLE_TESTING OFF CACHE BOOL "Disable mbedTLS tests" FORCE)
+set(ENABLE_PROGRAMS OFF CACHE BOOL "Disable mbedTLS programs" FORCE)
+set(ENABLE_TESTING OFF CACHE BOOL "Disable cJSON tests" FORCE)
+set(ENABLE_CJSON_TEST OFF CACHE BOOL "Disable cJSON tests" FORCE)
+set(BUILD_SHARED_LIBS OFF CACHE BOOL "Build static libraries" FORCE)
+# Don't let the vendored mbedTLS treat its own compiler warnings as errors:
+# its warning flags (e.g. -Werror=unterminated-string-initialization) are not
+# portable across compilers and break the build on some AppleClang versions.
+set(MBEDTLS_FATAL_WARNINGS OFF CACHE BOOL "Disable mbedTLS -Werror" FORCE)
+# Tolerate unknown -W options so a compiler that doesn't recognise a flag warns
+# instead of erroring (older/newer AppleClang differ on which warnings exist).
+add_compile_options($<$<COMPILE_LANG_AND_ID:C,AppleClang>:-Wno-unknown-warning-option>)
+
+function(agentic_kit_require_dependency name)
+    string(TOLOWER "${name}" name_lc)
+    set(dep_dir "${CMAKE_CURRENT_SOURCE_DIR}/third_party/${name}")
+    if(EXISTS "${dep_dir}/CMakeLists.txt" OR EXISTS "${dep_dir}/source")
+        set(${name_lc}_source_dir "${dep_dir}" PARENT_SCOPE)
+    else()
+        message(FATAL_ERROR "Missing dependency third_party/${name}. Run git submodule update --init --recursive from the repository root.")
+    endif()
+endfunction()
+
+agentic_kit_require_dependency(mbedtls)
+agentic_kit_require_dependency(cJSON)
+agentic_kit_require_dependency(coreHTTP)
+agentic_kit_require_dependency(coreMQTT)
+
+# mbedTLS uses its vendored default config. The SDK deliberately does not set
+# MBEDTLS_USER_CONFIG_FILE or alter mbedTLS's global config (allocator, record
+# sizes): the host application may share the same mbedTLS, so those are the
+# integrator's to own (see common/tls.h).
+
+if(NOT TARGET MbedTLS::mbedtls)
+    add_subdirectory("${mbedtls_source_dir}" "${CMAKE_BINARY_DIR}/third_party/mbedtls" EXCLUDE_FROM_ALL)
+endif()
+
+if(NOT TARGET cjson AND NOT TARGET cJSON)
+    add_subdirectory("${cjson_source_dir}" "${CMAKE_BINARY_DIR}/third_party/cJSON" EXCLUDE_FROM_ALL)
+endif()
+
+if(TARGET cjson)
+    set(AGENTIC_KIT_CJSON_TARGET cjson)
+elseif(TARGET cJSON)
+    set(AGENTIC_KIT_CJSON_TARGET cJSON)
+else()
+    message(FATAL_ERROR "cJSON target was not created")
+endif()
+
+if(TARGET MbedTLS::mbedtls)
+    set(AGENTIC_KIT_MBEDTLS_TARGETS MbedTLS::mbedtls MbedTLS::mbedx509 MbedTLS::mbedcrypto)
+else()
+    set(AGENTIC_KIT_MBEDTLS_TARGETS mbedtls mbedx509 mbedcrypto)
+endif()
+
+add_library(core_http STATIC
+    "${corehttp_source_dir}/source/core_http_client.c"
+    "${corehttp_source_dir}/source/dependency/3rdparty/llhttp/src/api.c"
+    "${corehttp_source_dir}/source/dependency/3rdparty/llhttp/src/http.c"
+    "${corehttp_source_dir}/source/dependency/3rdparty/llhttp/src/llhttp.c"
+)
+# No HTTP_DO_NOT_USE_CUSTOM_CONFIG: coreHTTP picks up common/core_http_config.h,
+# routing its Error/Warn into the log facade — the counterpart to coreMQTT above,
+# and the half that matters on the ATOP path the MQTT refusal docs send people to.
+#
+# `common` is PUBLIC here, unlike coreMQTT's PRIVATE: core_http_client.h itself
+# includes core_http_config_defaults.h (and through it core_http_config.h), so
+# every consumer of the header — http_client_interface.c — needs the path too.
+target_include_directories(core_http PUBLIC
+    "${corehttp_source_dir}/source/include"
+    "${corehttp_source_dir}/source/interface"
+    "${corehttp_source_dir}/source/dependency/3rdparty/llhttp/include"
+    "${CMAKE_CURRENT_SOURCE_DIR}/common"
+)
+
+# coreHTTP's objects now reference log_emit(); declare it rather than relying on
+# archive scan order. Same reasoning as core_mqtt.
+target_link_libraries(core_http PRIVATE agentic_kit_common)
+
+add_library(core_mqtt STATIC
+    "${coremqtt_source_dir}/source/core_mqtt.c"
+    "${coremqtt_source_dir}/source/core_mqtt_serializer.c"
+    "${coremqtt_source_dir}/source/core_mqtt_state.c"
+)
+# No MQTT_DO_NOT_USE_CUSTOM_CONFIG: coreMQTT picks up common/core_mqtt_config.h,
+# which routes its Error/Warn logs into the SDK log facade. Without it a refused
+# CONNECT reaches the caller as a bare MQTTServerRefused, with the broker's
+# actual reason discarded inside coreMQTT.
+#
+# `common` is PRIVATE: only coreMQTT's own three .c files include
+# core_mqtt_config_defaults.h (and through it core_mqtt_config.h) -- core_mqtt.h
+# does not, so consumers need nothing. PUBLIC would put this repo's `common/` on
+# every consumer's include path, where generic names like log.h and tls.h can
+# shadow an integrator's own headers.
+target_include_directories(core_mqtt
+    PUBLIC
+        "${coremqtt_source_dir}/source/include"
+        "${coremqtt_source_dir}/source/interface"
+    PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/common"
+)
+
+# coreMQTT's objects now reference log_emit(). Declare it: without this the link
+# only succeeds because some other archive happens to be scanned first and drags
+# log.o in -- a target that links core_mqtt alone would fail. agentic_kit_common
+# is defined further down; CMake resolves target names regardless of order.
+target_link_libraries(core_mqtt PRIVATE agentic_kit_common)
+
+# -----------------------------------------------------------------------------
+# Common library (process-wide log facade, shared TLS transport, etc.)
+# -----------------------------------------------------------------------------
+set(COMMON_DIR "${CMAKE_CURRENT_SOURCE_DIR}/common")
+
+add_library(agentic_kit_common STATIC
+    "${COMMON_DIR}/log.c"
+    "${COMMON_DIR}/tls.c"
+    "${COMMON_DIR}/rng.c"
+)
+target_include_directories(agentic_kit_common PUBLIC
+    "${COMMON_DIR}"
+    "${CMAKE_CURRENT_SOURCE_DIR}/pal"   # tls.c / tls.h need pal.h
+)
+target_link_libraries(agentic_kit_common PUBLIC ${AGENTIC_KIT_MBEDTLS_TARGETS})
+
+# -----------------------------------------------------------------------------
+# PAL (Platform Abstraction Layer)
+# -----------------------------------------------------------------------------
+set(PAL_DIR "${CMAKE_CURRENT_SOURCE_DIR}/pal")
+
+add_library(agentic_kit_pal STATIC
+    "${PAL_DIR}/pal_posix.c"
+)
+target_include_directories(agentic_kit_pal PUBLIC "${PAL_DIR}")
+target_link_libraries(agentic_kit_pal PUBLIC agentic_kit_common Threads::Threads)
+
+# -----------------------------------------------------------------------------
+# rtc-tcp-client module (Tuya AI Foundation 2.1)
+# -----------------------------------------------------------------------------
+set(AI_TCP_DIR "${CMAKE_CURRENT_SOURCE_DIR}/modules/rtc-tcp-client")
+
+set(AI_TCP_SOURCES
+    "${AI_TCP_DIR}/src/tai_attrs.c"
+    "${AI_TCP_DIR}/src/tai_client.c"
+    "${AI_TCP_DIR}/src/tai_crypto.c"
+    "${AI_TCP_DIR}/src/tai_packet.c"
+    "${AI_TCP_DIR}/src/tai_pkt_log.c"
+    "${AI_TCP_DIR}/src/tai_protocol.c"
+    "${AI_TCP_DIR}/src/tai_transport.c"
+)
+
+add_library(tuya_ai_tcp STATIC ${AI_TCP_SOURCES})
+target_include_directories(tuya_ai_tcp PUBLIC
+    "${AI_TCP_DIR}/include"
+    "${PAL_DIR}"
+    "${COMMON_DIR}"
+)
+target_link_libraries(tuya_ai_tcp PUBLIC agentic_kit_pal agentic_kit_common Threads::Threads)
+
+# -----------------------------------------------------------------------------
+# iot-client module
+# -----------------------------------------------------------------------------
+set(IOT_CLIENT_DIR "${CMAKE_CURRENT_SOURCE_DIR}/modules/iot-client")
+
+set(IOT_CLIENT_SOURCES
+    "${IOT_CLIENT_DIR}/src/atop.c"
+    "${IOT_CLIENT_DIR}/src/atop_base.c"
+    "${IOT_CLIENT_DIR}/src/cipher_wrapper.c"
+    "${IOT_CLIENT_DIR}/src/http_client_interface.c"
+    "${IOT_CLIENT_DIR}/src/iot_ai_ctrl.c"
+    "${IOT_CLIENT_DIR}/src/iot_atop.c"
+    "${IOT_CLIENT_DIR}/src/iot_client.c"
+    "${IOT_CLIENT_DIR}/src/iot_client_message.c"
+    "${IOT_CLIENT_DIR}/src/iot_dns.c"
+    "${IOT_CLIENT_DIR}/src/iot_dp.c"
+    "${IOT_CLIENT_DIR}/src/iot_on_boarding.c"
+    "${IOT_CLIENT_DIR}/src/iot_ota.c"
+    "${IOT_CLIENT_DIR}/src/iot_ota_verify.c"
+    "${IOT_CLIENT_DIR}/src/iot_pal_defaults.c"
+    "${IOT_CLIENT_DIR}/src/mqtt.c"
+)
+
+add_library(tuya_iot_client STATIC ${IOT_CLIENT_SOURCES})
+target_include_directories(tuya_iot_client PUBLIC
+    "${IOT_CLIENT_DIR}/include"
+    "${IOT_CLIENT_DIR}/src"
+    "${cjson_source_dir}"
+    "${PAL_DIR}"
+    "${COMMON_DIR}"
+)
+target_link_libraries(tuya_iot_client PUBLIC
+    ${AGENTIC_KIT_CJSON_TARGET}
+    agentic_kit_pal
+    agentic_kit_common          # provides mbedTLS transitively (shared TLS lives here)
+    core_http
+    core_mqtt
+    Threads::Threads
+)
+
+# -----------------------------------------------------------------------------
+# biz-client module (typed device-side cloud services)
+# -----------------------------------------------------------------------------
+set(BIZ_CLIENT_DIR "${CMAKE_CURRENT_SOURCE_DIR}/modules/biz-client")
+set(BIZ_CLIENT_SOURCES
+    "${BIZ_CLIENT_DIR}/src/biz_client.c"
+    "${BIZ_CLIENT_DIR}/src/ai_role.c"
+)
+add_library(tuya_biz_client STATIC ${BIZ_CLIENT_SOURCES})
+target_include_directories(tuya_biz_client
+    PUBLIC "${BIZ_CLIENT_DIR}/include"
+    PRIVATE "${cjson_source_dir}"
+)
+target_link_libraries(tuya_biz_client PUBLIC tuya_iot_client
+    PRIVATE ${AGENTIC_KIT_CJSON_TARGET} agentic_kit_common)
+if(UNIX)
+    target_link_libraries(tuya_biz_client PRIVATE m)
+endif()
+
+# -----------------------------------------------------------------------------
+# rtc-client module (prebuilt binary)
+# -----------------------------------------------------------------------------
+set(STEAM_CLIENT_DIR "${CMAKE_CURRENT_SOURCE_DIR}/modules/rtc-client")
+
+if(APPLE AND CMAKE_SYSTEM_PROCESSOR STREQUAL "arm64")
+    set(STEAM_CLIENT_LIB_DIR "${STEAM_CLIENT_DIR}/libs/macos_arm64")
+elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|amd64")
+    set(STEAM_CLIENT_LIB_DIR "${STEAM_CLIENT_DIR}/libs/linux-gnu-amd64")
+elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64")
+    set(STEAM_CLIENT_LIB_DIR "${STEAM_CLIENT_DIR}/libs/linux-gnu-aarch64")
+else()
+    set(STEAM_CLIENT_LIB_DIR "")
+endif()
+
+if(STEAM_CLIENT_LIB_DIR AND EXISTS "${STEAM_CLIENT_LIB_DIR}/libstm.a")
+    add_library(tuya_steam_client STATIC IMPORTED GLOBAL)
+    set_target_properties(tuya_steam_client PROPERTIES
+        IMPORTED_LOCATION "${STEAM_CLIENT_LIB_DIR}/libstm.a"
+        INTERFACE_INCLUDE_DIRECTORIES "${STEAM_CLIENT_DIR}/include"
+    )
+endif()
+
+# -----------------------------------------------------------------------------
+# tuya-ble module
+# -----------------------------------------------------------------------------
+set(TUYA_BLE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/modules/tuya-ble")
+
+add_library(tuya_ble STATIC
+    "${TUYA_BLE_DIR}/src/tuya_ble_bigdata.c"
+    "${TUYA_BLE_DIR}/src/tuya_ble_prov.c"
+    "${TUYA_BLE_DIR}/src/tuya_ble_trsmitr.c"
+)
+target_include_directories(tuya_ble PUBLIC
+    "${TUYA_BLE_DIR}/include"
+    "${cjson_source_dir}"
+)
+target_link_libraries(tuya_ble PUBLIC
+    agentic_kit_common
+    ${AGENTIC_KIT_CJSON_TARGET}
+    ${AGENTIC_KIT_MBEDTLS_TARGETS}
+)
+
+# -----------------------------------------------------------------------------
+# Tests
+# -----------------------------------------------------------------------------
+if(AGENTIC_KIT_BUILD_TESTS AND AGENTIC_KIT_ENABLE_PROJECT_TESTS)
+    # Fake only the public ATOP boundary, so service parsing/ownership can be
+    # checked without network credentials or a subprocess. Register in ctest.
+    add_executable(biz_ai_role_test ${BIZ_CLIENT_SOURCES}
+        "${BIZ_CLIENT_DIR}/test/ai_role_test.c")
+    target_include_directories(biz_ai_role_test PRIVATE
+        "${BIZ_CLIENT_DIR}/include" "${IOT_CLIENT_DIR}/include"
+        "${PAL_DIR}" "${COMMON_DIR}" "${cjson_source_dir}")
+    target_compile_options(biz_ai_role_test PRIVATE -Wall -Wextra -Werror)
+    target_link_libraries(biz_ai_role_test PRIVATE
+        ${AGENTIC_KIT_CJSON_TARGET} agentic_kit_common)
+    if(UNIX)
+        target_link_libraries(biz_ai_role_test PRIVATE m)
+    endif()
+    add_test(NAME biz_ai_role_test COMMAND biz_ai_role_test)
+
+    set(AI_TCP_TESTS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/modules/rtc-tcp-client/test")
+    set(IOT_CLIENT_TESTS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/modules/iot-client/test")
+    set(TUYA_BLE_TESTS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/modules/tuya-ble/test")
+
+    # Compile the actual FreeRTOS PAL against host-only kernel/lwIP shims and
+    # exercise its clock callbacks. The test shims are never IDF AK_SRCS.
+    foreach(clock_config IN ITEMS "16_1000" "32_1000" "32_100" "32_128" "32_2000" "64_1000")
+        string(REPLACE "_" ";" clock_parts "${clock_config}")
+        list(GET clock_parts 0 clock_bits)
+        list(GET clock_parts 1 clock_hz)
+        set(clock_target "pal_freertos_time_${clock_config}_test")
+        add_executable(${clock_target}
+            "${PAL_DIR}/pal_freertos.c" "${PAL_DIR}/test/test_freertos_time.c")
+        target_include_directories(${clock_target} PRIVATE
+            "${PAL_DIR}/test" "${PAL_DIR}" "${COMMON_DIR}")
+        target_compile_definitions(${clock_target} PRIVATE
+            TEST_TICK_BITS=${clock_bits} TEST_TICK_HZ=${clock_hz}
+            AGENTIC_KIT_LOG_LEVEL=0 gettimeofday=pal_test_gettimeofday)
+        if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
+            target_compile_options(${clock_target} PRIVATE -Wall -Wextra -Werror)
+        endif()
+        add_test(NAME ${clock_target} COMMAND ${clock_target})
+    endforeach()
+
+    # Inject clock_gettime only in this target to exercise the production
+    # POSIX PAL when UTC is unset, unavailable, or corrected.
+    add_executable(pal_posix_time_test
+        "${PAL_DIR}/pal_posix.c" "${PAL_DIR}/test/test_posix_time.c")
+    target_include_directories(pal_posix_time_test PRIVATE
+        "${PAL_DIR}" "${COMMON_DIR}")
+    target_compile_definitions(pal_posix_time_test PRIVATE
+        AGENTIC_KIT_LOG_LEVEL=0 clock_gettime=pal_test_clock_gettime)
+    target_link_libraries(pal_posix_time_test PRIVATE Threads::Threads)
+    if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
+        target_compile_options(pal_posix_time_test PRIVATE -Wall -Wextra -Werror)
+    endif()
+    add_test(NAME pal_posix_time_test COMMAND pal_posix_time_test)
+
+    # Offline cache/path/concurrency regressions run in both CI CTest jobs.
+    add_test(NAME freertos_pal_cache_test
+        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/test_check_freertos_pal.py")
+
+    # Explicit networked check, separate from the offline CTest suite.
+    add_custom_target(check_freertos_pal
+        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tools/check_freertos_pal.py"
+            --cc "${CMAKE_C_COMPILER}"
+        COMMENT "Check the PAL against pinned official FreeRTOS 10/11 headers"
+        VERBATIM)
+
+    add_executable(workflow_variables_demo_test
+        "${AI_TCP_TESTS_DIR}/workflow_variables_demo_test.c")
+    target_link_libraries(workflow_variables_demo_test PRIVATE tuya_iot_client tuya_ai_tcp)
+    add_test(NAME workflow_variables_demo_test COMMAND workflow_variables_demo_test)
+
+    add_executable(tai_unit_tests
+        ${AI_TCP_SOURCES}
+        "${AI_TCP_TESTS_DIR}/test_core.c"
+        "${AI_TCP_TESTS_DIR}/test_log.c"
+    )
+    target_include_directories(tai_unit_tests PRIVATE
+        "${AI_TCP_DIR}/include"
+        "${AI_TCP_DIR}/src"
+        "${AI_TCP_TESTS_DIR}/log_config"
+        "${PAL_DIR}"
+    )
+    target_link_libraries(tai_unit_tests PRIVATE
+        agentic_kit_pal          # pulls agentic_kit_common -> mbedTLS transitively
+        Threads::Threads
+    )
+    add_test(NAME tai_unit_tests COMMAND tai_unit_tests)
+
+    # Compile the same unit suite with the SDK-wide log ceiling fully closed.
+    # Its packet-log regression verifies both no dispatch and no argument
+    # evaluation at the call site.
+    add_executable(tai_log_level_zero_tests
+        ${AI_TCP_SOURCES}
+        "${AI_TCP_TESTS_DIR}/test_core.c"
+        "${AI_TCP_TESTS_DIR}/test_log.c"
+    )
+    target_include_directories(tai_log_level_zero_tests PRIVATE
+        "${AI_TCP_DIR}/include"
+        "${AI_TCP_DIR}/src"
+        "${AI_TCP_TESTS_DIR}/log_config"
+        "${PAL_DIR}"
+    )
+    target_compile_definitions(tai_log_level_zero_tests PRIVATE
+        AGENTIC_KIT_LOG_LEVEL=0
+    )
+    target_link_libraries(tai_log_level_zero_tests PRIVATE
+        agentic_kit_pal
+        Threads::Threads
+    )
+    add_test(NAME tai_log_level_zero_tests COMMAND tai_log_level_zero_tests)
+
+    # Same suite with ONLY the rtc-tcp-client module ceiling closed
+    # (-DAGENTIC_KIT_TAI_LOG_LEVEL=0) while the SDK-wide ceiling stays at
+    # its default: proves the per-module knob lowers independently -- the
+    # module assertions take the compiled-out branches while test_core.c's
+    # direct-facade probe still dispatches.
+    add_executable(tai_log_module_zero_tests
+        ${AI_TCP_SOURCES}
+        "${AI_TCP_TESTS_DIR}/test_core.c"
+        "${AI_TCP_TESTS_DIR}/test_log.c"
+    )
+    target_include_directories(tai_log_module_zero_tests PRIVATE
+        "${AI_TCP_DIR}/include"
+        "${AI_TCP_DIR}/src"
+        "${AI_TCP_TESTS_DIR}/log_config"
+        "${PAL_DIR}"
+    )
+    target_compile_definitions(tai_log_module_zero_tests PRIVATE
+        AGENTIC_KIT_TAI_LOG_LEVEL=0
+    )
+    target_link_libraries(tai_log_module_zero_tests PRIVATE
+        agentic_kit_pal
+        Threads::Threads
+    )
+    add_test(NAME tai_log_module_zero_tests COMMAND tai_log_module_zero_tests)
+
+    # Prove that packet-log level selection is purely compile-time across the
+    # ceiling/sampling modes. The script preprocesses and compiles tai_pkt_log.c
+    # in nineteen configurations -- the SDK-wide ceiling and the rtc-tcp-client-only
+    # ceiling each swept over levels 0/2/3/4 x sampling 0/50, plus module-above-global
+    # clamp probes -- then inspects the expanded sinks.
+    add_test(NAME tai_pkt_log_compile_matrix
+        COMMAND "${CMAKE_COMMAND}"
+            "-DSOURCE_DIR=${CMAKE_SOURCE_DIR}"
+            "-DOUTPUT_DIR=${CMAKE_CURRENT_BINARY_DIR}/tai-pkt-log-compile-matrix"
+            "-DC_COMPILER=${CMAKE_C_COMPILER}"
+            -P "${AI_TCP_TESTS_DIR}/test_pkt_log_compile_matrix.cmake"
+    )
+
+    add_executable(tai_integration_tests
+        ${AI_TCP_SOURCES}
+        "${AI_TCP_TESTS_DIR}/tai_pal_loopback.c"
+        "${AI_TCP_TESTS_DIR}/test_integration.c"
+        "${AI_TCP_TESTS_DIR}/test_log.c"
+    )
+    target_include_directories(tai_integration_tests PRIVATE
+        "${AI_TCP_DIR}/include"
+        "${AI_TCP_DIR}/src"
+        "${AI_TCP_TESTS_DIR}"
+        "${AI_TCP_TESTS_DIR}/log_config"
+        "${PAL_DIR}"
+    )
+    target_link_libraries(tai_integration_tests PRIVATE
+        agentic_kit_pal          # pulls agentic_kit_common -> mbedTLS transitively
+        Threads::Threads
+    )
+    add_test(NAME tai_integration_tests COMMAND tai_integration_tests)
+
+    # Test twin of tuya_iot_client: same sources, but the log dispatch is
+    # remapped into the test sink (log_config/agentic_kit_config.h on its
+    # PUBLIC include path), so library-TU logs are capturable/quietable.
+    # The vendored coreHTTP/coreMQTT sources compile in too: their logs are
+    # routed into the facade by common/core_http_config.h and
+    # common/core_mqtt_config.h, so they are part of the SDK's logging
+    # surface -- outside the remap their lines would bypass the sink (and
+    # a runtime handler no longer exists to catch them library-agnostically).
+    # The plain tuya_iot_client and the core_http/core_mqtt targets stay
+    # remap-free for the examples.
+    # Keep sources/includes/links in sync with tuya_iot_client above and
+    # the core_http/core_mqtt targets above.
+    add_library(tuya_iot_client_testlog STATIC
+        ${IOT_CLIENT_SOURCES}
+        "${corehttp_source_dir}/source/core_http_client.c"
+        "${corehttp_source_dir}/source/dependency/3rdparty/llhttp/src/api.c"
+        "${corehttp_source_dir}/source/dependency/3rdparty/llhttp/src/http.c"
+        "${corehttp_source_dir}/source/dependency/3rdparty/llhttp/src/llhttp.c"
+        "${coremqtt_source_dir}/source/core_mqtt.c"
+        "${coremqtt_source_dir}/source/core_mqtt_serializer.c"
+        "${coremqtt_source_dir}/source/core_mqtt_state.c"
+        "${IOT_CLIENT_TESTS_DIR}/test_log.c"
+    )
+    target_include_directories(tuya_iot_client_testlog PUBLIC
+        "${IOT_CLIENT_DIR}/include"
+        "${IOT_CLIENT_DIR}/src"
+        "${IOT_CLIENT_TESTS_DIR}/log_config"
+        "${corehttp_source_dir}/source/include"
+        "${corehttp_source_dir}/source/interface"
+        "${corehttp_source_dir}/source/dependency/3rdparty/llhttp/include"
+        "${coremqtt_source_dir}/source/include"
+        "${coremqtt_source_dir}/source/interface"
+        "${cjson_source_dir}"
+        "${PAL_DIR}"
+        "${COMMON_DIR}"
+    )
+    target_link_libraries(tuya_iot_client_testlog PUBLIC
+        ${AGENTIC_KIT_CJSON_TARGET}
+        agentic_kit_pal
+        agentic_kit_common          # provides mbedTLS transitively (shared TLS lives here)
+        Threads::Threads
+    )
+
+    function(agentic_kit_add_iot_test target source)
+        add_executable(${target} "${source}")
+        target_link_libraries(${target} PRIVATE tuya_iot_client_testlog)
+        target_compile_definitions(${target} PRIVATE
+            PYTHON3_EXEC="${Python3_EXECUTABLE}"
+            TEST_CONFIG_DIR="${IOT_CLIENT_TESTS_DIR}/config"
+            DNS_MOCK_PATH="${IOT_CLIENT_TESTS_DIR}/mock/dns_mock.py"
+            MOCK_SCRIPT_PATH="${IOT_CLIENT_TESTS_DIR}/mock/atop_mock.py"
+            ATOP_MOCK_PATH="${IOT_CLIENT_TESTS_DIR}/mock/atop_mock.py"
+            MQTT_MOCK_SCRIPT_PATH="${IOT_CLIENT_TESTS_DIR}/mock/mqtt_test_mock.py"
+            ONBOARDING_MQTT_MOCK_PATH="${IOT_CLIENT_TESTS_DIR}/mock/on_boarding_mock.py"
+            MESSAGE_MOCK_PATH="${IOT_CLIENT_TESTS_DIR}/mock/message_mock.py"
+        )
+        add_test(NAME ${target} COMMAND ${target})
+    endfunction()
+
+    agentic_kit_add_iot_test(iot_cipher_test "${IOT_CLIENT_TESTS_DIR}/cipher_test.c")
+    agentic_kit_add_iot_test(iot_dns_test "${IOT_CLIENT_TESTS_DIR}/dns_test.c")
+    agentic_kit_add_iot_test(iot_atop_test "${IOT_CLIENT_TESTS_DIR}/atop_test.c")
+    agentic_kit_add_iot_test(iot_atop_call_test "${IOT_CLIENT_TESTS_DIR}/iot_atop_call_test.c")
+    agentic_kit_add_iot_test(iot_session_token_test "${IOT_CLIENT_TESTS_DIR}/iot_session_token_test.c")
+    agentic_kit_add_iot_test(iot_reset_test "${IOT_CLIENT_TESTS_DIR}/iot_reset_test.c")
+    agentic_kit_add_iot_test(iot_mqtt_test "${IOT_CLIENT_TESTS_DIR}/mqtt_test.c")
+    agentic_kit_add_iot_test(iot_message_test "${IOT_CLIENT_TESTS_DIR}/iot_client_message_test.c")
+    agentic_kit_add_iot_test(iot_ai_ctrl_test "${IOT_CLIENT_TESTS_DIR}/iot_ai_ctrl_test.c")
+    agentic_kit_add_iot_test(iot_on_boarding_test "${IOT_CLIENT_TESTS_DIR}/on_boarding_test.c")
+    agentic_kit_add_iot_test(iot_dp_test "${IOT_CLIENT_TESTS_DIR}/iot_dp_test.c")
+    agentic_kit_add_iot_test(iot_ota_test "${IOT_CLIENT_TESTS_DIR}/iot_ota_test.c")
+    agentic_kit_add_iot_test(iot_ota_verify_test "${IOT_CLIENT_TESTS_DIR}/iot_ota_verify_test.c")
+
+    add_executable(iot_tai_control_test
+        ${AI_TCP_SOURCES}
+        "${AI_TCP_TESTS_DIR}/tai_pal_loopback.c"
+        "${IOT_CLIENT_TESTS_DIR}/iot_tai_control_test.c"
+        "${IOT_CLIENT_TESTS_DIR}/mqtt_interrupt_demo_test.c"
+        "${IOT_CLIENT_TESTS_DIR}/test_log.c"
+    )
+    target_include_directories(iot_tai_control_test PRIVATE
+        "${AI_TCP_DIR}/include"
+        "${AI_TCP_DIR}/src"
+        "${AI_TCP_TESTS_DIR}"
+        "${IOT_CLIENT_DIR}/include"
+        "${IOT_CLIENT_DIR}/src"
+        "${IOT_CLIENT_TESTS_DIR}"
+        "${IOT_CLIENT_TESTS_DIR}/log_config"
+        "${cjson_source_dir}"
+        "${PAL_DIR}"
+        "${COMMON_DIR}"
+    )
+    target_link_libraries(iot_tai_control_test PRIVATE
+        tuya_iot_client_testlog
+        agentic_kit_pal
+        Threads::Threads
+    )
+    target_compile_definitions(iot_tai_control_test PRIVATE
+        PYTHON3_EXEC="${Python3_EXECUTABLE}"
+        TEST_CONFIG_DIR="${IOT_CLIENT_TESTS_DIR}/config"
+        MESSAGE_MOCK_PATH="${IOT_CLIENT_TESTS_DIR}/mock/message_mock.py"
+    )
+    add_test(NAME iot_tai_control_test COMMAND iot_tai_control_test)
+
+    # The ble sources compile into the executable (not the tuya_ble
+    # library) so they pick up the test sink's log remap from
+    # tuya_iot_client_testlog's include path -- that is what lets
+    # test_wire assert on "[ble] [TRSMITR]" warns.
+    add_executable(tuya_ble_test
+        "${TUYA_BLE_DIR}/src/tuya_ble_bigdata.c"
+        "${TUYA_BLE_DIR}/src/tuya_ble_prov.c"
+        "${TUYA_BLE_DIR}/src/tuya_ble_trsmitr.c"
+        "${TUYA_BLE_TESTS_DIR}/test_wire.c"
+        "${TUYA_BLE_TESTS_DIR}/test_prov.c"
+        "${TUYA_BLE_TESTS_DIR}/tuya_ble_hal_host.c"
+    )
+    target_include_directories(tuya_ble_test PRIVATE
+        "${TUYA_BLE_DIR}/include"
+        "${IOT_CLIENT_TESTS_DIR}"        # test_log.h -- the shared test sink
+        "${cjson_source_dir}"
+    )
+    target_link_libraries(tuya_ble_test PRIVATE tuya_iot_client_testlog)
+    add_test(NAME tuya_ble_test COMMAND tuya_ble_test)
+endif()
+
+# -----------------------------------------------------------------------------
+# Examples (standalone build recommended: cmake -S examples/posix -B build)
+# -----------------------------------------------------------------------------
+if(AGENTIC_KIT_BUILD_EXAMPLES)
+    add_subdirectory(examples/posix)
+endif()

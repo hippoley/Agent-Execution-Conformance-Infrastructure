@@ -1,0 +1,35 @@
+# Context Map
+
+The agentic-kit SDK spans several device-side contexts. Each owns its own language
+and decisions.
+
+## Contexts
+
+- [Business Client](./modules/biz-client/CONTEXT.md) — typed device-side cloud
+  business services, initially AI role management and language/timbre queries.
+- [IoT Client](./modules/iot-client/CONTEXT.md) — device ↔ Tuya cloud: activation, the
+  Data Point model, MQTT reporting/downlink. ADRs: `modules/iot-client/docs/adr/`.
+- [RTC TCP Client](./modules/rtc-tcp-client/CONTEXT.md) — device ↔ Tuya AI Foundation
+  real-time audio/video/text transport: the Connection, Session, Event lifecycle and the
+  binary packet/frame framing. Design decisions live in CONTEXT.md and the callback-contract
+  block in `modules/rtc-tcp-client/include/tuya_ai.h`.
+- [Tuya BLE](./modules/tuya-ble/CONTEXT.md) — device ↔ app BLE provisioning: advertising,
+  the pairing handshake, and WiFi-credential delivery.
+
+## Relationships
+
+- **Business Client → IoT Client**: uses only `iot_atop_call()` and its public
+  response-release contract. It does not depend on RTC or own application tasks.
+- **IoT Client → RTC TCP Client**: the IoT Client obtains an AI session token
+  (`iot_client_get_session_token`) that the RTC client uses to open a Session.
+  Applications may also keep MQTT active as an independent control path:
+  authenticated protocol-9000 notices reach `ai_ctrl_callback_t` even while
+  receive backpressure stalls the RTC Connection. The application composes the
+  callbacks; neither client owns or calls the other. Decision records:
+  `modules/iot-client/docs/adr/0002-mqtt-ai-control-remains-application-composed.md`
+  and `modules/rtc-tcp-client/docs/adr/0001-receive-backpressure-pauses-the-connection.md`.
+- **Tuya BLE → IoT Client**: BLE provisioning runs first and hands the device its WiFi
+  credentials (incl. the pairing token); once on WiFi, the IoT Client uses them to activate
+  against the cloud.
+- All contexts share the Platform Abstraction Layer (`pal/pal.h`) for sockets, memory,
+  mutex, threads, and time.
