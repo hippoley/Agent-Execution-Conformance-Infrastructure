@@ -14,6 +14,7 @@ from urllib.request import Request, urlopen
 
 from agentscope.tool import ToolBase, ToolChunk
 from agentscope.message import TextBlock, ToolResultState
+from agentscope.permission import PermissionContext, PermissionDecision, PermissionBehavior
 
 
 class FakeTuyaLampTool(ToolBase):
@@ -28,7 +29,7 @@ class FakeTuyaLampTool(ToolBase):
     is_concurrency_safe = False
     is_read_only = False
 
-    def __init__(self, base_url: str, token: str, tenant: str = "tenant-demo", device: str = "esp32-demo"):
+    def __init__(self, base_url: str, token: str, tenant: str = "tenant-demo", device: str = "esp32-demo", *, allow_test_execution: bool = False):
         super().__init__()
         u = urlsplit(base_url)
         if u.scheme != "http" or u.hostname not in {"localhost", "127.0.0.1"}:
@@ -37,6 +38,15 @@ class FakeTuyaLampTool(ToolBase):
         self.token = token
         self.tenant = tenant
         self.device = device
+        self.allow_test_execution = allow_test_execution
+
+    async def check_permissions(self, tool_input: dict, context: PermissionContext) -> PermissionDecision:
+        # Permission checked by the actual upstream ToolBase interface. This
+        # flag MUST be granted by trusted harness code, never model arguments.
+        on = tool_input.get('on')
+        if not self.allow_test_execution or type(on) is not bool:
+            return PermissionDecision(behavior=PermissionBehavior.DENY, message='Test device execution disabled or invalid arguments')
+        return PermissionDecision(behavior=PermissionBehavior.ALLOW, message='Explicitly enabled loopback-only test tool')
 
     def _request(self, path: str, command=None):
         data = json.dumps(command).encode("utf-8") if command is not None else None
@@ -87,4 +97,4 @@ class FakeTuyaLampTool(ToolBase):
             return ToolChunk(content=[TextBlock(text='{"status":"INVALID_ARGUMENTS"}')], state=ToolResultState.ERROR)
         result = await asyncio.to_thread(self._execute, on)
         return ToolChunk(content=[TextBlock(text=json.dumps(result))],
-                         state=ToolResultState.RUNNING if result["status"] == "CONFIRMED_IN_FAKE_SERVICE" else ToolResultState.ERROR)
+                         state=ToolResultState.SUCCESS if result["status"] == "CONFIRMED_IN_FAKE_SERVICE" else ToolResultState.ERROR)
