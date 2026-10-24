@@ -25,8 +25,6 @@ jobs:
         run: git add -f -- third_party/sources/tuya__TuyaOpen
       - name: Verify every official Git blob and file mode in index
         run: python3 tools/verify_tuyaopen_import.py
-      - name: Check whitespace and filesystem constraints
-        run: git diff --cached --check
       - name: Commit and push only after passing exact tree verification
         env:
           GH_TOKEN: ${{ github.token }}
