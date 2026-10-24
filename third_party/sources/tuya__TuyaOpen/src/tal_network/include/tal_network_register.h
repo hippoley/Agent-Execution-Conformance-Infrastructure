@@ -32,6 +32,7 @@ typedef struct {
     int (*get_nonblock)(const int fd);
     OPERATE_RET (*set_block)(const int fd, const BOOL_T block);
     TUYA_ERRNO (*close)(const int fd);
+    TUYA_ERRNO (*shutdown)(const int fd, const int how);
     int (*socket_create)(const TUYA_PROTOCOL_TYPE_E type);
     TUYA_ERRNO (*connect)(const int fd, const TUYA_IP_ADDR_T addr, const uint16_t port);
     TUYA_ERRNO (*connect_raw)(const int fd, void *p_socket, const int len);
@@ -53,6 +54,8 @@ typedef struct {
     OPERATE_RET (*set_keepalive)(int fd, const BOOL_T alive, const uint32_t idle, const uint32_t intr,
                                  const uint32_t cnt);
     OPERATE_RET (*get_socket_ip)(int fd, TUYA_IP_ADDR_T *addr);
+    OPERATE_RET (*getsockname)(int fd, TUYA_IP_ADDR_T *addr, uint16_t *port);
+    OPERATE_RET (*getpeername)(int fd, TUYA_IP_ADDR_T *addr, uint16_t *port);
     TUYA_IP_ADDR_T (*str2addr)(const char *ip_str);
     char *(*addr2str)(TUYA_IP_ADDR_T ipaddr);
     OPERATE_RET (*setsockopt)(const int fd, const TUYA_OPT_LEVEL level, const TUYA_OPT_NAME optname, const void *optval,
@@ -86,6 +89,27 @@ OPERATE_RET tal_network_card_set_active(TAL_NETWORK_CARD_TYPE_E type);
 TAL_NETWORK_CARD_TYPE_E tal_network_card_get_active_type(void);
 
 TAL_NETWORK_OPS_T *tal_network_get_active_ops(void);
+
+/**
+ * @brief Record the source address outbound sockets should bind to.
+ *
+ * Pushed by whoever owns link selection (netmgr) when the active connection or
+ * its address changes, so the value is refreshed exactly once per link event
+ * instead of being looked up on every connect.
+ *
+ * @param[in] ipaddr the active connection address, or 0 when no link is up
+ *
+ * @return OPRT_OK on success. Others on error, please refer to tuya_error_code.h
+ */
+OPERATE_RET tal_network_card_set_active_ip(TUYA_IP_ADDR_T ipaddr);
+
+/**
+ * @brief Get the source address outbound sockets should bind to.
+ *
+ * @return the active connection address, or 0 when unknown - callers must treat
+ *         0 as "do not bind" and let the stack pick the source itself.
+ */
+TUYA_IP_ADDR_T tal_network_card_get_active_ip(void);
 
 #ifdef __cplusplus
 }

@@ -1,0 +1,74 @@
+config ENABLE_WIFI
+    bool
+    default y
+
+config ENABLE_BLUETOOTH
+    bool "Enable Bluetooth"
+    select ENABLE_BT_SERVICE
+    select ENABLE_NIMBLE
+    # esp32c2 has only 132KB heap; WiFi + BLE controller do not fit together,
+    # so default BT off there (can still be enabled manually).
+    default n if CHIP_CHOICE = "esp32c2"
+    default y
+
+config ENABLE_ADC
+    bool
+    default y
+
+config ENABLE_GPIO
+    bool
+    default y
+
+config ENABLE_UART
+    bool
+    default y
+
+config ENABLE_PWM
+    bool
+    default y
+
+config ENABLE_I2C
+    bool
+    default y
+
+config ENABLE_I2S
+    bool
+    default y
+
+config ENABLE_SPI
+    bool
+    default y
+
+config ENABLE_TIMER
+    bool
+    default y
+
+config ENABLE_WATCHDOG
+    bool
+    default y
+
+config ENABLE_AUDIO
+    bool
+    default n
+
+config ENABLE_VIDEO
+    bool
+    default n
+
+config ENABLE_EXT_RAM
+    bool
+    default n
+
+config ENABLE_DMA2D
+    bool
+    default n
+    ---help---
+        2D-DMA / pixel-processing hardware acceleration (tkl_dma2d).
+        Backed by the PPA on ESP32-P4; has no effect on other ESP32 targets.
+
+config LITTLE_END
+    int
+    default 1
+    ---help---
+        0       /* big endian */
+        1       /* little endian */
