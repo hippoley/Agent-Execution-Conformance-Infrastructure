@@ -1,6 +1,9 @@
-name: Manual exact TuyaOpen Git tree import
+name: Pinned TuyaOpen exact Git tree import
 on:
   workflow_dispatch:
+  push:
+    paths:
+      - '.github/tuyaopen-import-once-20261024.txt'
 permissions:
   contents: write
 concurrency:
