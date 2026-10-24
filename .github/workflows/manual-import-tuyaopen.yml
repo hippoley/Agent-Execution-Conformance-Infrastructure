@@ -1,4 +1,4 @@
-name: Manual pinned TuyaOpen full source import
+name: Manual exact TuyaOpen Git tree import
 on:
   workflow_dispatch:
 permissions:
@@ -15,22 +15,41 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: true
-      - name: Fetch pinned TuyaOpen (not firmware demo revision)
-        run: bash tools/bootstrap_upstreams.sh core
-      - name: Preflight source import
-        run: python3 tools/vendor_upstreams.py --only tuya/TuyaOpen
-      - name: Import missing upstream files
-        run: python3 tools/vendor_upstreams.py --apply --only tuya/TuyaOpen
-      - name: Stage all source objects including ignored files
-        run: git add -f -- third_party/sources/tuya__TuyaOpen
-      - name: Verify every official Git blob and file mode in index
-        run: python3 tools/verify_tuyaopen_import.py
-      - name: Commit and push only after passing exact tree verification
-        env:
-          GH_TOKEN: ${{ github.token }}
+      - name: Import pinned Git tree and verify remote main
+        shell: bash
         run: |
+          set -euo pipefail
+          PIN="$(python3 - <<'PY'
+          import json
+          with open("upstreams/sources.lock.json") as f: data=json.load(f)
+          print(next(x["commit"] for x in data["upstreams"] if x["name"]=="tuya/TuyaOpen"))
+          PY
+          )"
+          PREFIX="third_party/sources/tuya__TuyaOpen"
+          git fetch --no-tags --filter=blob:none https://github.com/tuya/TuyaOpen.git "$PIN"
+          test "$(git rev-parse 'FETCH_HEAD^{commit}')" = "$PIN"
+          UPSTREAM_TREE="$(git rev-parse "$PIN^{tree}")"
+          COUNT="$(git ls-tree -r "$UPSTREAM_TREE" | awk '$2=="blob"{n++}END{print n+0}')"
+          test "$COUNT" -eq 13183
+          test "$(git ls-tree -r "$UPSTREAM_TREE" | awk '$2=="commit"{n++}END{print n+0}')" -eq 4
+          # Preserve official copyright material exactly; no transformations.
+          git cat-file -e "$PIN:LICENSE"
+          INDEX="$(mktemp)"
+          rm -f "$INDEX"
+          trap 'rm -f "$INDEX"' EXIT
+          export GIT_INDEX_FILE="$INDEX"
+          git read-tree HEAD
+          git rm -rq --cached --ignore-unmatch -- "$PREFIX"
+          git read-tree -i --prefix="$PREFIX/" "$UPSTREAM_TREE"
+          NEW_TREE="$(git write-tree)"
+          test "$(git rev-parse "$NEW_TREE:$PREFIX")" = "$UPSTREAM_TREE"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          if git diff --cached --quiet; then echo "No missing sources"; exit 0; fi
-          git commit -m "vendor(tuya): complete pinned TuyaOpen 13183-file source mirror"
-          git push origin HEAD:main
+          if test "$(git rev-parse "HEAD:$PREFIX" 2>/dev/null || true)" != "$UPSTREAM_TREE"; then
+            NEW_COMMIT="$(printf '%s\n' 'vendor(tuya): import exact pinned 13183-blob TuyaOpen tree' | git commit-tree "$NEW_TREE" -p HEAD)"
+            git push origin "$NEW_COMMIT:refs/heads/main"
+          fi
+          git fetch --no-tags origin main
+          REMOTE_TREE="$(git rev-parse "FETCH_HEAD:$PREFIX")"
+          test "$REMOTE_TREE" = "$UPSTREAM_TREE"
+          echo "PASS: remote main TuyaOpen tree $REMOTE_TREE equals upstream $UPSTREAM_TREE (13,183 blobs; 4 gitlinks)"
