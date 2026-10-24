@@ -1,0 +1,3 @@
+One-time trigger for the path-scoped TuyaOpen full Git tree import.
+Pinned upstream: 65dc25312ca2c3e25599d90966f3a9c3af87c871
+Acceptance: 13,183 upstream blobs, exact remote main tree SHA.
