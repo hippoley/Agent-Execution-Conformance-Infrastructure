@@ -25,9 +25,7 @@ def git(*args, cwd=ROOT):
 def entry_source(entry):
     name = entry["name"]
     if name == "tuya/TuyaOpen":
-        lock = (ROOT / "firmware" / "tuyaopen" / "UPSTREAM.lock").read_text()
-        commit = next(line.partition("=")[2].strip() for line in lock.splitlines() if line.startswith("commit="))
-        return ROOT / ".deps" / "TuyaOpen", commit
+        return ROOT / ".deps" / "upstream" / "tuya__TuyaOpen", entry["commit"]
     return ROOT / ".deps" / "upstream" / name.replace("/", "__"), entry["commit"]
 
 def main():
