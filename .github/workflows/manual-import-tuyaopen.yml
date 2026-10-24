@@ -1,0 +1,38 @@
+name: Manual pinned TuyaOpen full source import
+on:
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: tuyaopen-full-import
+  cancel-in-progress: false
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+      - name: Fetch pinned TuyaOpen (not firmware demo revision)
+        run: bash tools/bootstrap_upstreams.sh core
+      - name: Preflight source import
+        run: python3 tools/vendor_upstreams.py --only tuya/TuyaOpen
+      - name: Import missing upstream files
+        run: python3 tools/vendor_upstreams.py --apply --only tuya/TuyaOpen
+      - name: Stage all source objects including ignored files
+        run: git add -f -- third_party/sources/tuya__TuyaOpen
+      - name: Verify every official Git blob and file mode in index
+        run: python3 tools/verify_tuyaopen_import.py
+      - name: Check whitespace and filesystem constraints
+        run: git diff --cached --check
+      - name: Commit and push only after passing exact tree verification
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if git diff --cached --quiet; then echo "No missing sources"; exit 0; fi
+          git commit -m "vendor(tuya): complete pinned TuyaOpen 13183-file source mirror"
+          git push origin HEAD:main
