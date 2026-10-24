@@ -14,14 +14,9 @@ root=pathlib.Path(".deps/upstream")
 root.mkdir(parents=True,exist_ok=True)
 for x in manifest["upstreams"]:
     if x["name"] not in selected: continue
-    if x["name"]=="tuya/TuyaOpen":
-        # Honor the already established tested baseline lock, not the latest manifest reference.
-        lock=pathlib.Path("firmware/tuyaopen/UPSTREAM.lock").read_text()
-        sha=next(y.partition("=")[2].strip() for y in lock.splitlines() if y.startswith("commit="))
-        dest=pathlib.Path(".deps/TuyaOpen")
-    else:
-        sha=x["commit"]
-        dest=root/x["name"].replace("/","__")
+    # Sources always use the source-catalog pin; firmware demo lock is independent.
+    sha=x["commit"]
+    dest=root/x["name"].replace("/","__")
     if not dest.exists():
         subprocess.run(["git","clone","--filter=blob:none","--no-checkout",x["url"],str(dest)],check=True)
     actual=subprocess.check_output(["git","-C",str(dest),"rev-parse","HEAD"],text=True).strip()
